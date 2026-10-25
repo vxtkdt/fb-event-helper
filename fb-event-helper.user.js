@@ -1,11 +1,13 @@
 // ==UserScript==
-// @name         Facebook Event Helper 7.3 - Multi Batch Runner
+// @name         Facebook Event Helper 7.4 - Multi Batch Runner & Auto Update
 // @namespace    fb-event-helper
-// @version      7.3
-// @description  5 Events, Checkbox Batch Execution, Google Sheets, nhật ký hoạt động
+// @version      7.4
+// @description  5 Events, Checkbox Batch Execution, Google Sheets, Nút Cập nhật nhanh
 // @match        https://www.facebook.com/*
 // @match        https://web.facebook.com/*
 // @run-at       document-idle
+// @updateURL    https://raw.githubusercontent.com/vxtkdt/fb-event-helper/refs/heads/main/fb-event-helper.user.js
+// @downloadURL  https://raw.githubusercontent.com/vxtkdt/fb-event-helper/refs/heads/main/fb-event-helper.user.js
 // @grant        GM_xmlhttpRequest
 // @grant        GM_getValue
 // @grant        GM_setValue
@@ -16,8 +18,11 @@
 (function () {
   'use strict';
 
-  if (window.__FEH73__) return;
-  window.__FEH73__ = true;
+  if (window.__FEH74__) return;
+  window.__FEH74__ = true;
+
+  // ĐƯỜNG DẪN RAW GITHUB ĐỂ NÚT BẤM CẬP NHẬT TỰ ĐỘNG
+  const UPDATE_RAW_URL = 'https://raw.githubusercontent.com/vxtkdt/fb-event-helper/refs/heads/main/fb-event-helper.user.js';
 
   const API = 'https://script.google.com/macros/s/AKfycbwKv4JjTvgqGVbYfwp6LfNkVEXaDQcjlVQrLxUYk6bljkAwXzvUDtTFyZopwFU9-gfA/exec';
 
@@ -107,7 +112,7 @@
 
   function log(message) {
     const line = `[${new Date().toLocaleTimeString('vi-VN')}] ${message}`;
-    console.log('[FEH 7.3]', message);
+    console.log('[FEH 7.4]', message);
     const box = $('feh71-log');
     if (box) {
       box.textContent += (box.textContent ? '\n' : '') + line;
@@ -669,11 +674,10 @@
     }
 
     if (selectedIndices.length === 0) {
-      log('Vui lòng tích chọn ít nhất 1 Event ở các tab bên dưới!');
+      log('Vui lòng tích chọn ít nhất 1 Event!');
       return;
     }
 
-    // Kiểm tra tính hợp lệ của các URL được chọn
     for (const idx of selectedIndices) {
       const item = config[idx];
       if (!validUrl(item.url.trim())) {
@@ -791,7 +795,7 @@
     } finally {
       busy = false;
       cancelled = false;
-      
+
       if (task) {
         task = null;
         saveTask();
@@ -872,7 +876,7 @@
     div.id = 'feh71';
     div.innerHTML = `
       <div id="feh71-head">
-        <span>Facebook Event Helper v7.3 (Batch Runner)</span>
+        <span>Facebook Event Helper v7.4</span>
         <span id="feh71-toggle">[-]</span>
       </div>
       <div id="feh71-body">
@@ -920,6 +924,8 @@
 
         <div class="feh71-row">
           <button id="feh71-stop" style="background: #fa383e;">Dừng tất cả</button>
+          <!-- NÚT BẤM CẬP NHẬT MỚI THÊM -->
+          <button id="feh71-update-script" style="background: #722ed1;" title="Cập nhật phiên bản script mới nhất từ GitHub">Cập nhật Script</button>
         </div>
 
         <div id="feh71-log">Nhật ký hoạt động khởi tạo...</div>
@@ -938,7 +944,7 @@
 
     for (let i = 0; i < COUNT; i++) {
       $(`feh71-tab-${i}`).onclick = (e) => {
-        if (e.target.tagName === 'INPUT') return; // Không đổi tab khi click vào checkbox
+        if (e.target.tagName === 'INPUT') return;
         tab = i;
         GM_setValue(K.tab, tab);
         renderEvent();
@@ -967,9 +973,15 @@
     $('feh71-batch-like-cmts').onclick = () => startBatch('like-comments');
     $('feh71-stop').onclick = stopBatch;
 
+    // XỬ LÝ SỰ KIỆN CẬP NHẬT SCRIPT
+    $('feh71-update-script').onclick = () => {
+      log('Đang mở liên kết cập nhật script...');
+      window.open(UPDATE_RAW_URL, '_blank');
+    };
+
     renderProfiles();
     renderEvent();
-    log('Giao diện v7.3 đã sẵn sàng.');
+    log('Giao diện v7.4 (Đã tích hợp Cập nhật) đã sẵn sàng.');
   }
 
   // Khởi động
