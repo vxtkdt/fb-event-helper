@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Facebook Event Helper 8.2.1 - Robust Photo Like & Tag
+// @name         Facebook Event Helper 8.2.2 - Robust Photo Like & Tag
 // @namespace    fb-event-helper
-// @version      8.2.1
+// @version      8.2.2
 // @description  5 Events, Checkbox Batch, Xác nhận Like bài viết và Tag trước khi gửi
 // @match        https://www.facebook.com/*
 // @match        https://web.facebook.com/*
@@ -146,7 +146,7 @@
 
   function log(message) {
     const line = `[${new Date().toLocaleTimeString('vi-VN')}] ${message}`;
-    console.log('[FEH 8.2.1]', message);
+    console.log('[FEH 8.2.2]', message);
     const box = $('feh71-log');
     if (box) {
       box.textContent += (box.textContent ? '\n' : '') + line;
@@ -375,6 +375,13 @@
   // ==============================
   // LIKE ẢNH CẢI TIẾN (ĐA TẦNG, AN TOÀN)
   // ==============================
+  function isPostLikeAction(text) {
+    const value = norm(text);
+    return /^React with Like to .+['’]s post[.]?$/i.test(value) ||
+      /^(?:Bày tỏ|Thả) cảm xúc (?:bằng )?Thích (?:về|với|cho|vào|trên|đối với) bài viết (?:của )?.+/i.test(value) ||
+      /^Thích bài viết của .+/i.test(value);
+  }
+
   function reactionState(node) {
     if (!node) return 'unknown';
     const aria = norm(node.getAttribute('aria-label'));
@@ -384,8 +391,8 @@
     const texts = nodes.flatMap(n => [n.getAttribute('aria-label'), n.getAttribute('title'),
       n.getAttribute('data-tooltip-content'), ...(n.innerText || n.textContent || '').split(/\r?\n/)]).map(norm).filter(Boolean);
     if (nodes.some(n => n.getAttribute('aria-pressed') === 'true') || texts.some(t =>
-      /^(Unlike|Remove Like|Change Like reaction|Gỡ thích|Bỏ thích|Đã thích)(?:$|[,.]|\s+from\s)/i.test(t))) return 'liked';
-    if (/^React with Like to .+['’]s post[.]?$/i.test(aria)) return 'unliked';
+      /^(Unlike|Remove Like|Change Like reaction|Gỡ thích|Bỏ thích|Đã thích)(?:$|[,.]|\s+from\s|\s+(?:khỏi|cho|về|trên|bài viết)\b)/i.test(t))) return 'liked';
+    if (isPostLikeAction(aria)) return 'unliked';
     if (texts.some(t => /^(Like|Thích)$/i.test(t))) return 'unliked';
     return 'unknown';
   }
@@ -420,7 +427,7 @@
       return leaf.length === 1 ? leaf[0] : null;
     }
     if (marked.length) return uniqueLeaf(marked);
-    const explicit = eligible.filter(n => /^React with Like to .+['’]s post[.]?$/i.test(norm(n.getAttribute('aria-label'))));
+    const explicit = eligible.filter(n => isPostLikeAction(n.getAttribute('aria-label')));
     if (explicit.length) return uniqueLeaf(explicit);
     // Fallback for layouts without the post marker: require a compact action row.
     const confirmed = eligible.filter(n => {
@@ -451,13 +458,13 @@
         rows.push({ level: depth + 1, role: p.getAttribute('role'), count: controls.length,
           actions: controls.map(b => label(b)).filter(t => /^(Like|Thích|Unlike|Remove Like|Change Like reaction|Gỡ thích|Bỏ thích|Đã thích|Reply|Trả lời|Comment|Bình luận|Share|Chia sẻ)(?:$|[,.])/i.test(t)).slice(0, 15) });
       }
-      log('CHẨN ĐOÁN NÚT ' + (i + 1) + ': ' + JSON.stringify({ state: reactionState(n), comment: inComment(n), rows }));
+      log('CHẨN ĐOÁN NÚT ' + (i + 1) + ': ' + JSON.stringify({ aria: n.getAttribute('aria-label'), text: norm(n.innerText || n.textContent).slice(0, 100), pressed: n.getAttribute('aria-pressed'), marker: !!(n.matches('[data-ad-rendering-role="like_button"]') || n.querySelector('[data-ad-rendering-role="like_button"]')), state: reactionState(n), comment: inComment(n), rows }));
     }
   }
 
   async function likePhoto(record) {
     check();
-    // Recheck the page: 8.2.1 wrote postLiked=true even when it failed.
+    // Recheck the page: 8.2.2 wrote postLiked=true even when it failed.
     let button = null;
     for (let i = 0; i < 16; i++) {
       check();
@@ -1054,7 +1061,7 @@
     div.id = 'feh71';
     div.innerHTML = `
       <div id="feh71-head">
-        <span>Facebook Event Helper v8.2.1</span>
+        <span>Facebook Event Helper v8.2.2</span>
         <span id="feh71-toggle">[-]</span>
       </div>
       <div id="feh71-body">
@@ -1120,7 +1127,7 @@
           <div style="flex:1;background:#e8f5e9;padding:9px;border-radius:6px;">Đã Like CMT<br><b id="feh82-likes" style="font-size:18px !important;">0/100</b></div>
         </div>
         <div style="margin-top:4px;color:#65676b;">Lượt Like CMT gần nhất của Event đang mở. Tải thêm đếm số lần bấm; Like chỉ đếm lượt mới đã xác nhận.</div>
-        <div id="feh71-log">Nhật ký hoạt động khởi tạo v8.2.1...</div>
+        <div id="feh71-log">Nhật ký hoạt động khởi tạo v8.2.2...</div>
       </div>
     `;
 
@@ -1171,7 +1178,7 @@
     saveEventSelection();
     renderProfiles();
     renderEvent();
-    log('Giao diện v8.2.1 đã sẵn sàng.');
+    log('Giao diện v8.2.2 đã sẵn sàng.');
   }
 
   setTimeout(() => {
