@@ -1099,7 +1099,10 @@
     // XỬ LÝ SỰ KIỆN CẬP NHẬT SCRIPT
     $('feh71-update-script').onclick = () => {
       log('Đang mở liên kết cập nhật script...');
-      window.open(UPDATE_RAW_URL, '_blank');
+      window.open(
+  'https://github.com/vxtkdt/fb-event-helper/raw/refs/heads/main/fb-event-helper.user.js',
+  '_blank'
+);
     };
 
     renderProfiles();
