@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         Facebook Event Helper 7.5 - Batch & Tag
+// @name         Facebook Event Helper 8.2.1 - Robust Photo Like & Tag
 // @namespace    fb-event-helper
-// @version      7.5
-// @description  5 Events, Checkbox Batch Execution, Google Sheets, Nút Cập nhật nhanh
+// @version      8.2.1
+// @description  5 Events, Checkbox Batch, Xác nhận Like bài viết và Tag trước khi gửi
 // @match        https://www.facebook.com/*
 // @match        https://web.facebook.com/*
 // @run-at       document-idle
@@ -18,12 +18,10 @@
 (function () {
   'use strict';
 
-  if (window.__FEH75__) return;
-  window.__FEH75__ = true;
+  if (window.__FEH81__) return;
+  window.__FEH81__ = true;
 
-  // ĐƯỜNG DẪN RAW GITHUB ĐỂ NÚT BẤM CẬP NHẬT TỰ ĐỘNG
   const UPDATE_RAW_URL = 'https://raw.githubusercontent.com/vxtkdt/fb-event-helper/refs/heads/main/fb-event-helper.user.js';
-
   const API = 'https://script.google.com/macros/s/AKfycbwKv4JjTvgqGVbYfwp6LfNkVEXaDQcjlVQrLxUYk6bljkAwXzvUDtTFyZopwFU9-gfA/exec';
 
   const COUNT = 5;
@@ -38,8 +36,7 @@
     sync: 'fb_event_helper_sync_v66',
     profiles: 'fb_event_helper_profiles_v70',
     tab: 'fb_event_helper_tab_v71',
-    batch: 'fb_event_helper_batch_v73',
-    tags: 'fb_event_helper_tags_v75'
+    batch: 'fb_event_helper_batch_v73'
   };
 
   const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -67,7 +64,9 @@
     Array.from({ length: COUNT }, (_, i) => ({
       url: String(older[i]?.url || ''),
       comment: String(older[i]?.comment || ''),
-      keyword: String(older[i]?.keyword || '')
+      keyword: String(older[i]?.keyword || ''),
+      tagKude: Boolean(older[i]?.tagKude || false),
+      tagDoru: Boolean(older[i]?.tagDoru || false)
     }))
   );
 
@@ -75,25 +74,14 @@
   config = Array.from({ length: COUNT }, (_, i) => ({
     url: String(config[i]?.url || ''),
     comment: String(config[i]?.comment || ''),
-    keyword: String(config[i]?.keyword || '')
+    keyword: String(config[i]?.keyword || ''),
+    tagKude: Boolean(config[i]?.tagKude || false),
+    tagDoru: Boolean(config[i]?.tagDoru || false)
   }));
 
   let state = store(K.state, legacy(K.state, { records: {} }));
   if (!state || typeof state !== 'object') state = { records: {} };
   state.records ||= {};
-
-  // Cài đặt Tag riêng cho từng Event, không bị ghi đè khi đồng bộ Sheets.
-  let tagSettings = store(K.tags, {});
-  if (!tagSettings || typeof tagSettings !== 'object') tagSettings = {};
-  function tagKey(index) { return selectedProfile + '::' + index; }
-  function getTags(index) {
-    const v = tagSettings[tagKey(index)] || {};
-    return { kude: !!v.kude, doru: !!v.doru };
-  }
-  function saveTags(index, name, value) {
-    tagSettings[tagKey(index)] = { ...getTags(index), [name]: !!value };
-    GM_setValue(K.tags, tagSettings);
-  }
 
   let task = store(K.task, null);
   let batchTask = store(K.batch, null);
@@ -114,6 +102,38 @@
 
   const eventStatus = Array.from({ length: COUNT }, () => 'Sẵn sàng');
 
+  const SELECTION_KEY = 'fb_event_helper_selected_events_v821';
+  function loadEventSelection() {
+    const saved = store(SELECTION_KEY, null);
+    if (Array.isArray(saved) && saved.length === COUNT && saved.every(value => typeof value === 'boolean')) return [...saved];
+    // On first upgrade, retain the active queue instead of showing all Events selected.
+    if (Array.isArray(batchTask?.queue) && batchTask.queue.length) {
+      return Array.from({ length: COUNT }, (_, i) => batchTask.queue.includes(i));
+    }
+    return Array.from({ length: COUNT }, () => true);
+  }
+  let selectedEvents = loadEventSelection();
+  function saveEventSelection() { GM_setValue(SELECTION_KEY, [...selectedEvents]); }
+
+  const COUNTER_KEY = 'fb_event_helper_counters_v82';
+  let runCounters = store(COUNTER_KEY, {});
+  if (!runCounters || typeof runCounters !== 'object' || Array.isArray(runCounters)) runCounters = {};
+
+  function counterKey(index) { return selectedProfile + '::' + keyFor(config[index].url); }
+  function countersFor(index) {
+    return runCounters[counterKey(index)] || { expands: 0, likes: 0 };
+  }
+  function renderCounters() {
+    const value = countersFor(tab);
+    if ($('feh82-expands')) $('feh82-expands').textContent = `${value.expands}/${MAX_EXPANDS}`;
+    if ($('feh82-likes')) $('feh82-likes').textContent = `${value.likes}/${MAX_LIKES}`;
+  }
+  function updateCounters(index, values) {
+    runCounters[counterKey(index)] = { ...countersFor(index), ...values };
+    GM_setValue(COUNTER_KEY, runCounters);
+    if (index === tab) renderCounters();
+  }
+
   function saveConfig() { GM_setValue(K.config, config); }
   function saveState() { GM_setValue(K.state, state); }
   function saveTask() { GM_setValue(K.task, task); }
@@ -126,7 +146,7 @@
 
   function log(message) {
     const line = `[${new Date().toLocaleTimeString('vi-VN')}] ${message}`;
-    console.log('[FEH 7.5]', message);
+    console.log('[FEH 8.2.1]', message);
     const box = $('feh71-log');
     if (box) {
       box.textContent += (box.textContent ? '\n' : '') + line;
@@ -151,15 +171,30 @@
   }
 
   function buttons(root = document) {
-    return [...root.querySelectorAll('[role="button"],button')].filter(visible);
+    return [...root.querySelectorAll('[role="button"],button,div[role="button"]')].filter(visible);
   }
 
   function label(node) {
-    return norm(node?.getAttribute('aria-label') || node?.innerText || node?.textContent || '');
+    return norm(
+      node?.getAttribute('aria-label') ||
+      node?.getAttribute('data-tooltip-content') ||
+      node?.innerText ||
+      node?.textContent ||
+      ''
+    );
   }
 
-  function isLike(node) { return /^(Like|Thích)$/i.test(label(node)); }
-  function isUnlike(node) { return /^(Unlike|Remove Like|Change Like reaction|Gỡ Thích|Đã thích)$/i.test(label(node)); }
+  function isLike(node) {
+    const text = label(node);
+    return /^(Like|Thích)$/i.test(text);
+  }
+
+  function isUnlike(node) {
+    const text = label(node);
+    return /^(Unlike|Remove Like|Change Like reaction|Gỡ Thích|Đã thích|Bỏ thích)$/i.test(text) ||
+           node.getAttribute('aria-pressed') === 'true' ||
+           /Đã thích/i.test(text);
+  }
 
   function photoRoot() {
     const dialogs = [...document.querySelectorAll('[role="dialog"]')].filter(visible);
@@ -315,7 +350,9 @@
         next.push({
           url: String(event.url || '').trim(),
           comment: String(event.comment || ''),
-          keyword: String(event.keyword || '').trim()
+          keyword: String(event.keyword || '').trim(),
+          tagKude: !!config[i - 1]?.tagKude,
+          tagDoru: !!config[i - 1]?.tagDoru
         });
       }
 
@@ -336,65 +373,123 @@
   }
 
   // ==============================
-  // LIKE ẢNH
+  // LIKE ẢNH CẢI TIẾN (ĐA TẦNG, AN TOÀN)
   // ==============================
-  function findPhotoLikeButton() {
-    const root = photoRoot();
-    const anchors = [...root.querySelectorAll('[data-ad-rendering-role="like_button"]')]
-      .map(node => node.closest('[role="button"]') || node.querySelector('[role="button"]'))
-      .filter(Boolean).filter(visible);
-
-    const named = buttons(root).filter(node =>
-      /^(Remove Like|Change Like reaction|Unlike|Gỡ Thích|Đã thích|Thích|Like)$/i.test(label(node))
-    );
-
-    const all = [...new Set([...anchors, ...named])].filter(node => {
-      const rect = node.getBoundingClientRect();
-      return rect.width >= 30 && rect.height >= 25;
-    });
-
-    return all.length === 1 ? all[0] : null;
+  function reactionState(node) {
+    if (!node) return 'unknown';
+    const aria = norm(node.getAttribute('aria-label'));
+    // A population label opens the reaction list; it is never a Like action.
+    if (/^(Like|Thích):\s*[\d.,\s]+\s*(people|người)\b/i.test(aria)) return 'unknown';
+    const nodes = [node, ...node.querySelectorAll('[aria-label],[title],[aria-pressed]')];
+    const texts = nodes.flatMap(n => [n.getAttribute('aria-label'), n.getAttribute('title'),
+      n.getAttribute('data-tooltip-content'), ...(n.innerText || n.textContent || '').split(/\r?\n/)]).map(norm).filter(Boolean);
+    if (nodes.some(n => n.getAttribute('aria-pressed') === 'true') || texts.some(t =>
+      /^(Unlike|Remove Like|Change Like reaction|Gỡ thích|Bỏ thích|Đã thích)(?:$|[,.]|\s+from\s)/i.test(t))) return 'liked';
+    if (/^React with Like to .+['’]s post[.]?$/i.test(aria)) return 'unliked';
+    if (texts.some(t => /^(Like|Thích)$/i.test(t))) return 'unliked';
+    return 'unknown';
   }
 
-  function photoLiked(node) {
-    return !!node && (isUnlike(node) || node.getAttribute('aria-pressed') === 'true');
+  function inComment(node) {
+    for (let p = node; p && p !== photoRoot(); p = p.parentElement) {
+      const aria = p.getAttribute('aria-label') || '';
+      if (/^(Comment by|Bình luận của|Reply by|Phản hồi của)/i.test(aria)) return true;
+      if (p.matches('[role="article"],li') && p.querySelector('a[href*="comment_id="]')) return true;
+      const controls = buttons(p);
+      // Only a compact local row establishes a Reply relationship.
+      if (controls.length <= 8 && controls.some(n => /^(Reply|Trả lời)$/i.test(label(n)))) return true;
+      if (controls.length > 8 || controls.some(n => /^(Comment|Bình luận)$/i.test(label(n)))) break;
+    }
+    return false;
+  }
+
+  function findPhotoLikeButton() {
+    const root = photoRoot();
+    const eligible = buttons(root).filter(n => {
+      if (n.closest('#feh71') || inComment(n)) return false;
+      const aria = norm(n.getAttribute('aria-label'));
+      if (/^(Like|Thích):\s*[\d.,\s]+\s*(people|người)\b/i.test(aria)) return false;
+      return reactionState(n) !== 'unknown';
+    });
+    // Prefer the post action marker together with a recognized action state.
+    // Never choose the neighboring toolbar item named "Like: N people".
+    const marked = eligible.filter(n => n.matches('[data-ad-rendering-role="like_button"]') ||
+      n.querySelector('[data-ad-rendering-role="like_button"]'));
+    function uniqueLeaf(nodes) {
+      const leaf = nodes.filter(n => !nodes.some(other => other !== n && n.contains(other)));
+      return leaf.length === 1 ? leaf[0] : null;
+    }
+    if (marked.length) return uniqueLeaf(marked);
+    const explicit = eligible.filter(n => /^React with Like to .+['’]s post[.]?$/i.test(norm(n.getAttribute('aria-label'))));
+    if (explicit.length) return uniqueLeaf(explicit);
+    // Fallback for layouts without the post marker: require a compact action row.
+    const confirmed = eligible.filter(n => {
+      if (n.closest('[role="toolbar"]')) return false;
+      let p = n.parentElement;
+      for (let depth = 0; depth < 10 && p && p !== root; depth++, p = p.parentElement) {
+        const controls = buttons(p);
+        if (controls.some(b => /^(Reply|Trả lời)$/i.test(label(b)))) return false;
+        if (controls.length <= 12 && controls.some(b => /^(Comment|Bình luận|Share|Chia sẻ)(?:$|[,:])/i.test(label(b)))) return true;
+      }
+      return false;
+    });
+    return uniqueLeaf(confirmed);
+  }
+
+  function diagnosePhotoLike() {
+    const root = photoRoot();
+    const candidates = buttons(root).filter(n => !n.closest('#feh71') &&
+      (reactionState(n) !== 'unknown' || n.matches('[data-ad-rendering-role="like_button"]') ||
+       n.querySelector('[data-ad-rendering-role="like_button"]')));
+    log('CHẨN ĐOÁN LIKE: vùng=' + (root === document ? 'trang' : 'hộp thoại') + '; số ứng viên=' + candidates.length);
+    for (const [i, n] of candidates.slice(0, 12).entries()) {
+      const rows = [];
+      let p = n.parentElement;
+      for (let depth = 0; depth < 8 && p && p !== root; depth++, p = p.parentElement) {
+        // Only record action labels, never comment contents or profile names.
+        const controls = buttons(p);
+        rows.push({ level: depth + 1, role: p.getAttribute('role'), count: controls.length,
+          actions: controls.map(b => label(b)).filter(t => /^(Like|Thích|Unlike|Remove Like|Change Like reaction|Gỡ thích|Bỏ thích|Đã thích|Reply|Trả lời|Comment|Bình luận|Share|Chia sẻ)(?:$|[,.])/i.test(t)).slice(0, 15) });
+      }
+      log('CHẨN ĐOÁN NÚT ' + (i + 1) + ': ' + JSON.stringify({ state: reactionState(n), comment: inComment(n), rows }));
+    }
   }
 
   async function likePhoto(record) {
     check();
-    if (record.postLiked) {
-      log('Ảnh đã Like theo lịch sử');
-      return;
-    }
-    const button = findPhotoLikeButton();
-    if (!button) throw new Error('Không xác định duy nhất nút Like ảnh');
-
-    if (photoLiked(button)) {
-      record.postLiked = true;
-      saveState();
-      log('Ảnh đã Like');
-      return;
-    }
-
-    if (!isLike(button)) throw new Error('Không xác nhận được nút Like ảnh');
-    button.click();
-    log('Đã nhấn Like ảnh, đang kiểm tra...');
-
+    // Recheck the page: 8.2.1 wrote postLiked=true even when it failed.
+    let button = null;
     for (let i = 0; i < 16; i++) {
-      await sleep(300);
       check();
-      if (photoLiked(findPhotoLikeButton())) {
-        record.postLiked = true;
-        saveState();
-        log('✓ Đã xác nhận Like ảnh');
-        return;
+      button = findPhotoLikeButton();
+      if (button) break;
+      await sleep(400);
+    }
+    if (!button) {
+      diagnosePhotoLike();
+      throw new Error('Không xác định duy nhất hàng Like/Comment/Share của bài viết; chưa Like và chưa gửi CMT');
+    }
+    const status = reactionState(button);
+    if (status === 'liked') {
+      record.postLiked = true; saveState(); log('✓ Bài viết đã Like'); return;
+    }
+    if (status !== 'unliked') throw new Error('Chưa xác định trạng thái Like bài viết: ' + label(button));
+    record.postLiked = false;
+    saveState();
+    button.click();
+    for (let i = 0; i < 20; i++) {
+      await sleep(350); check();
+      const current = findPhotoLikeButton();
+      if (current && reactionState(current) === 'liked') {
+        record.postLiked = true; saveState(); log('✓ Đã xác nhận Like bài viết'); return;
       }
     }
-    throw new Error('Chưa xác nhận Like ảnh, không nhấn lại để tránh Unlike');
+    throw new Error('Chưa xác nhận Like bài viết; không nhấn lại và chưa gửi CMT');
   }
 
+
   // ==============================
-  // ĐĂNG BÌNH LUẬN
+  // ĐĂNG BÌNH LUẬN & TAG CUỐI THÔNG MINH
   // ==============================
   function findEditor() {
     const editors = [...photoRoot().querySelectorAll('[contenteditable="true"]')].filter(visible);
@@ -418,15 +513,112 @@
     return found.length === 1 ? found[0] : null;
   }
 
-  function enterText(editor, text) {
+  function moveEnd(editor) {
     editor.focus();
-    const selection = getSelection();
     const range = document.createRange();
-    range.selectNodeContents(editor);
-    selection.removeAllRanges();
-    selection.addRange(range);
-    return document.execCommand('insertText', false, text);
+    range.selectNodeContents(editor); range.collapse(false);
+    const selection = getSelection(); selection.removeAllRanges(); selection.addRange(range);
   }
+
+  // Lexical may render a selected mention as a non-spellchecked text span.
+  // Track only tokens observed after selecting the exact suggestion in this run.
+  const selectedMentionTokens = new WeakMap();
+
+  function rememberLexicalMention(editor, short, name) {
+    if (norm(editor.innerText).includes('@' + short)) return;
+    if (mentionOption(editor, name)) return; // suggestion must have closed
+    const tokens = [...editor.querySelectorAll('span[data-lexical-text="true"][spellcheck="false"]')]
+      .filter(n => norm(n.textContent) === name);
+    if (tokens.length !== 1) return;
+    let saved = selectedMentionTokens.get(editor);
+    if (!saved) { saved = new Map(); selectedMentionTokens.set(editor, saved); }
+    saved.set(name, tokens[0]);
+  }
+
+  function mentionEntity(editor, name) {
+    const token = selectedMentionTokens.get(editor)?.get(name);
+    if (token && editor.contains(token) && norm(token.textContent) === name) return true;
+    return [...editor.querySelectorAll('a[href],[data-entity-id],[data-mention-id],[contenteditable="false"]')]
+      .some(n => norm(n.innerText || n.textContent).replace(/^@/, '') === name);
+  }
+
+  function mentionOption(editor, name) {
+    const ids = norm(editor.getAttribute('aria-controls') || editor.getAttribute('aria-owns')).split(' ').filter(Boolean);
+    const linked = ids.map(id => document.getElementById(id)).filter(Boolean);
+    const roots = linked.length ? linked : [...document.querySelectorAll('[role="listbox"],[role="menu"]')].filter(visible);
+    const nodes = [...new Set(roots.flatMap(root => [...root.querySelectorAll('[role="option"],[role="menuitem"],[role="button"],li')]))];
+    // Some Facebook layouts expose options without a listbox wrapper.
+    if (!linked.length) nodes.push(...document.querySelectorAll('[role="option"],[role="menuitem"]'));
+    const matches = [...new Set(nodes)].filter(n => visible(n) && !n.closest('#feh71') &&
+      (n.innerText || n.textContent || '').split(/\r?\n/).some(line => norm(line) === name));
+    const leaf = matches.filter(n => !matches.some(other => other !== n && n.contains(other)));
+    return leaf.length === 1 ? leaf[0] : null;
+  }
+
+  async function addTag(editor, short, name) {
+    moveEnd(editor);
+    if (!document.execCommand('insertText', false, ' @' + short)) throw new Error('Không nhập được @' + short);
+    let option;
+    for (let i = 0; i < 30; i++) {
+      check(); option = mentionOption(editor, name);
+      if (option) break;
+      await sleep(300);
+    }
+    if (!option) throw new Error('Không tìm thấy duy nhất gợi ý ' + name + '; giữ bản nháp, không gửi');
+    // Target the name inside the suggestion so delegated handlers receive
+    // the same event target as a click on the visible name.
+    const names = [...option.querySelectorAll('span,div')].filter(n =>
+      norm(n.innerText || n.textContent) === name && visible(n));
+    const target = names.find(n => !names.some(other => other !== n && n.contains(other))) || option;
+    const rect = target.getBoundingClientRect();
+    const init = { bubbles: true, cancelable: true, composed: true,
+      button: 0, clientX: rect.left + rect.width / 2, clientY: rect.top + rect.height / 2 };
+    // Prevent a synthetic mousedown from moving focus out of the editor.
+    // Do not pass the userscript sandbox window as MouseEvent.view.
+    const preserveFocus = event => event.preventDefault();
+    target.addEventListener('mousedown', preserveFocus, { once: true });
+    try {
+      if (typeof PointerEvent === 'function') {
+        target.dispatchEvent(new PointerEvent('pointerdown', { ...init, buttons: 1, pointerId: 1, pointerType: 'mouse', isPrimary: true }));
+      }
+      target.dispatchEvent(new MouseEvent('mousedown', { ...init, buttons: 1 }));
+      if (typeof PointerEvent === 'function') {
+        target.dispatchEvent(new PointerEvent('pointerup', { ...init, buttons: 0, pointerId: 1, pointerType: 'mouse', isPrimary: true }));
+      }
+      target.dispatchEvent(new MouseEvent('mouseup', { ...init, buttons: 0 }));
+      target.dispatchEvent(new MouseEvent('click', { ...init, buttons: 0, detail: 1 }));
+    } finally {
+      target.removeEventListener('mousedown', preserveFocus);
+    }
+    for (let i = 0; i < 20; i++) {
+      await sleep(250); check();
+      rememberLexicalMention(editor, short, name);
+      if (mentionEntity(editor, name)) { log('✓ Đã xác nhận Tag ' + name); return; }
+    }
+    log('CHẨN ĐOÁN TAG: ' + JSON.stringify({ role: option.getAttribute('role'), target: target.tagName, draft: norm(editor.innerText), markup: editor.innerHTML.slice(0, 2500) }));
+    throw new Error('Facebook chưa ghi nhận Tag ' + name + '; giữ bản nháp, không gửi');
+  }
+
+  function validateDraft(editor, text, kude, doru) {
+    if (!editor.isConnected) throw new Error('Ô bình luận đã thay đổi; không gửi');
+    if (kude && !mentionEntity(editor, 'Kude Nohara')) throw new Error('Tag Kude Nohara chưa hoàn chỉnh; không gửi');
+    if (doru && !mentionEntity(editor, 'Nè Doru')) throw new Error('Tag Nè Doru chưa hoàn chỉnh; không gửi');
+    const expected = norm([text, kude ? 'Kude Nohara' : '', doru ? 'Nè Doru' : ''].filter(Boolean).join(' '));
+    if (norm(editor.innerText).replace(/@(?=Kude Nohara|Nè Doru)/g, '') !== expected) {
+      throw new Error('Nội dung hoặc Tag trong bản nháp không khớp; không gửi');
+    }
+  }
+
+  async function typeAndTag(editor, mainText, tagKude, tagDoru) {
+    if (norm(editor.innerText)) throw new Error('Ô bình luận đang có bản nháp; kiểm tra và xoá bản nháp trước khi chạy lại');
+    moveEnd(editor);
+    if (mainText && !document.execCommand('insertText', false, mainText)) throw new Error('Không nhập được nội dung CMT');
+    await sleep(1000); check();
+    if (tagKude) await addTag(editor, 'Kude', 'Kude Nohara');
+    if (tagDoru) await addTag(editor, 'Doru', 'Nè Doru');
+    validateDraft(editor, mainText, tagKude, tagDoru);
+  }
+
 
   function commentCount() {
     return photoRoot().querySelectorAll('a[href*="comment_id="]').length;
@@ -435,7 +627,7 @@
   function visibleComment(text) {
     return [...photoRoot().querySelectorAll('div[dir="auto"]')].some(node =>
       visible(node) && !node.closest('[contenteditable="true"]') &&
-      !node.querySelector('div[dir="auto"]') && norm(node.innerText) === norm(text)
+      !node.querySelector('div[dir="auto"]') && norm(node.innerText).includes(norm(text))
     );
   }
 
@@ -452,85 +644,11 @@
     return null;
   }
 
-  // Facebook mention chỉ hợp lệ khi chọn kết quả gợi ý,
-  // không phải khi chèn chuỗi @Kude hoặc @Doru đơn thuần.
-  function moveCaretToEnd(editor) {
-    editor.focus();
-    const range = document.createRange();
-    range.selectNodeContents(editor);
-    range.collapse(false);
-    const selection = getSelection();
-    selection.removeAllRanges();
-    selection.addRange(range);
-  }
-
-  function insertAtCaret(editor, value) {
-    moveCaretToEnd(editor);
-    return document.execCommand('insertText', false, value);
-  }
-
-  function mentionNodes() {
-    return [...document.querySelectorAll(
-      '[role="option"],[role="listbox"] [role="button"],[role="menuitem"],[data-visualcompletion="ignore-dynamic"] [role="button"]'
-    )].filter(node => visible(node) && !node.closest('#feh71'));
-  }
-
-  function exactMentionOption(fullName) {
-    const wanted = norm(fullName).toLocaleLowerCase('vi-VN');
-    const candidates = mentionNodes().filter(node => {
-      const own = norm(node.innerText || node.textContent || '');
-      const lines = own.split(/\n/).map(norm).filter(Boolean);
-      return lines.some(line => line.toLocaleLowerCase('vi-VN') === wanted) ||
-        own.toLocaleLowerCase('vi-VN') === wanted;
-    });
-    // Không chọn bừa khi có nhiều kết quả trùng tên.
-    return candidates.length === 1 ? candidates[0] : null;
-  }
-
-  function hasMentionEntity(editor, name) {
-    const wanted = norm(name).toLocaleLowerCase('vi-VN');
-    return [...editor.querySelectorAll(
-      'a[href], [data-entity-id], [data-mention-id], [contenteditable="false"]'
-    )].some(node => {
-      const t = norm(node.innerText || node.textContent).toLocaleLowerCase('vi-VN');
-      return t === wanted && (
-        node.matches('a[href], [data-entity-id], [data-mention-id]') ||
-        !!node.closest('a[href], [data-entity-id], [data-mention-id]') ||
-        node.getAttribute('contenteditable') === 'false'
-      );
-    });
-  }
-
-  async function addMention(editor, shortName, fullName) {
-    check();
-    if (!insertAtCaret(editor, ' @' + shortName)) {
-      throw new Error('Không nhập được @' + shortName);
-    }
-    log('Đang tìm Tag: ' + fullName);
-    let option = null;
-    for (let i = 0; i < 20; i++) {
-      check();
-      option = exactMentionOption(fullName);
-      if (option) break;
-      await sleep(300);
-    }
-    if (!option) {
-      throw new Error('Không thấy đúng gợi ý Tag ' + fullName + '; chưa đăng CMT');
-    }
-    option.click();
-    await sleep(650);
-    check();
-    if (!hasMentionEntity(editor, fullName)) {
-      throw new Error('Chưa xác nhận được Tag thật ' + fullName + '; chưa đăng CMT');
-    }
-    log('✓ Đã chọn Tag ' + fullName);
-  }
-
   async function sendComment(item, record) {
     check();
     const text = item.comment.trim();
-    if (!text) {
-      log('Không có nội dung CMT');
+    if (!text && !item.tagKude && !item.tagDoru) {
+      log('Không có nội dung CMT hoặc Tag để gửi');
       return;
     }
     if (record.commentSent) {
@@ -538,32 +656,18 @@
       return;
     }
     if (record.commentPending) {
-      throw new Error('CMT lần trước chưa xác nhận, không đăng lại để tránh trùng');
+      throw new Error('CMT lần trước chưa xác nhận');
     }
 
     const editor = findEditor();
-    if (!editor) throw new Error('Không xác định duy nhất ô bình luận');
+    if (!editor) throw new Error('Không tìm thấy ô bình luận');
 
     const beforeCount = commentCount();
-    if (!enterText(editor, text)) throw new Error('Không nhập được nội dung CMT');
-    if (norm(editor.innerText) !== norm(text)) {
-      throw new Error('Nội dung CMT không khớp');
-    }
 
-    const settings = getTags(config.indexOf(item));
-    if (settings.kude) await addMention(editor, 'Kude', 'Kude Nohara');
-    if (settings.doru) await addMention(editor, 'Doru', 'Nè Doru');
+    await typeAndTag(editor, text, item.tagKude, item.tagDoru);
 
-    // Kiểm tra lại trước khi gửi; Facebook có thể thay đổi DOM.
-    if (settings.kude && !hasMentionEntity(editor, 'Kude Nohara')) {
-      throw new Error('Tag Kude Nohara không còn hợp lệ; chưa đăng CMT');
-    }
-    if (settings.doru && !hasMentionEntity(editor, 'Nè Doru')) {
-      throw new Error('Tag Nè Doru không còn hợp lệ; chưa đăng CMT');
-    }
-
-    log('Đã chuẩn bị CMT, chờ 2 giây...');
-    await sleep(2000);
+    log('Đã nhập nội dung và Tag, đang tìm nút gửi...');
+    await sleep(1000);
     check();
 
     let sendButton = null;
@@ -575,6 +679,7 @@
     }
     if (!sendButton) throw new Error('Không tìm thấy nút đăng bình luận');
 
+    validateDraft(editor, text, item.tagKude, item.tagDoru);
     record.commentPending = true;
     saveState();
     sendButton.click();
@@ -584,21 +689,21 @@
     while (Date.now() - started < 15000) {
       check();
       const cleared = norm(editor.innerText).length === 0;
-      const appeared = visibleComment(text) || commentCount() > beforeCount;
+      const appeared = (text && visibleComment(text)) || commentCount() > beforeCount;
       if (cleared && appeared) {
         record.commentPending = false;
         record.commentSent = true;
         saveState();
-        log('✓ Đã xác nhận đăng CMT');
+        log('✓ Đã xác nhận đăng CMT thành công');
         return;
       }
       await sleep(400);
     }
-    throw new Error('Chưa xác nhận đăng CMT, không gửi lại để tránh trùng');
+    throw new Error('Chưa xác nhận được trạng thái đăng CMT');
   }
 
   // ==============================
-  // BỘ LỌC NEWEST
+  // BỘ LỌC NEWEST & LIKE CMT
   // ==============================
   function sortText(node) {
     return norm(node?.getAttribute('aria-label') || node?.innerText || node?.textContent || '');
@@ -619,53 +724,24 @@
     check();
     const newestPattern = /Bình luận mới nhất|Mới nhất|Newest|Most recent/i;
     const control = findSort();
-    if (!control) throw new Error('Không tìm thấy nút sắp xếp bình luận');
+    if (!control) return;
 
-    if (newestPattern.test(sortText(control))) {
-      log('✓ Bình luận đã ở chế độ Mới nhất');
-      return;
-    }
+    if (newestPattern.test(sortText(control))) return;
 
-    log('Đang mở bộ lọc bình luận...');
     control.click();
     await sleep(800);
     check();
 
-    function findNewestOption() {
-      const selectors = ['[role="menuitemradio"]', '[role="menuitem"]', '[role="option"]', '[role="radio"]', '[role="button"]', 'button', '[tabindex="0"]'].join(',');
-      const nodes = [...document.querySelectorAll(selectors)].filter(node => visible(node) && !node.closest('#feh71'));
-      const matches = nodes.filter(node => {
-        const text = sortText(node);
-        return newestPattern.test(text) && text.length < 250;
-      });
-      const inMenu = matches.filter(node => node.closest('[role="menu"],[role="listbox"],[role="radiogroup"]'));
-      if (inMenu.length) {
-        return inMenu.sort((a, b) => sortText(a).length - sortText(b).length)[0];
-      }
-      return matches.sort((a, b) => sortText(a).length - sortText(b).length)[0] || null;
+    const selectors = ['[role="menuitemradio"]', '[role="menuitem"]', '[role="option"]', '[role="radio"]', '[role="button"]', 'button'].join(',');
+    const nodes = [...document.querySelectorAll(selectors)].filter(node => visible(node) && !node.closest('#feh71'));
+    const matches = nodes.filter(node => newestPattern.test(sortText(node)));
+    if (matches[0]) {
+      matches[0].click();
+      await sleep(1000);
     }
-
-    let option = null;
-    for (let i = 0; i < 16; i++) {
-      check();
-      option = findNewestOption();
-      if (option) break;
-      await sleep(300);
-    }
-
-    if (!option) throw new Error('Không tìm thấy Bình luận mới nhất');
-
-    option.click();
-    log('Đã nhấn Bình luận mới nhất');
-    await sleep(1200);
-    check();
   }
 
-  // ==============================
-  // XEM THÊM
-  // ==============================
-  async function expandFive() {
-    let count = 0;
+  async function expandFive(index) {
     for (let i = 0; i < MAX_EXPANDS; i++) {
       check();
       const more = buttons(photoRoot()).filter(node =>
@@ -673,24 +749,21 @@
       );
       if (!more.length) break;
       more[0].click();
-      count++;
-      log(`Xem thêm bình luận ${count}/${MAX_EXPANDS}`);
+      updateCounters(index, { expands: countersFor(index).expands + 1 });
+      log(`Đã bấm tải thêm bình luận ${countersFor(index).expands}/${MAX_EXPANDS} lần`);
       await sleep(1400);
     }
   }
 
-  // ==============================
-  // LIKE COMMENT
-  // ==============================
   function commentRoot(link) {
     let node = link;
     for (let depth = 0; depth < 12 && node; depth++, node = node.parentElement) {
       const controls = buttons(node);
       const reply = controls.some(element => /^(Trả lời|Reply)$/i.test(label(element)));
-      const likes = controls.filter(element => (isLike(element) || isUnlike(element)) && !element.querySelector('[data-ad-rendering-role="like_button"]'));
-      if (reply && likes.length === 1) return node;
+      const likes = controls.filter(element => (isLike(element) || isUnlike(element)));
+      if (reply || likes.length > 0) return node;
     }
-    return null;
+    return link.closest('[aria-article-id]') || link.parentElement;
   }
 
   function findComments() {
@@ -702,7 +775,7 @@
       if (!id || found.has(id)) continue;
       const root = commentRoot(link);
       if (!root) continue;
-      const like = buttons(root).find(node => (isLike(node) || isUnlike(node)) && !node.querySelector('[data-ad-rendering-role="like_button"]'));
+      const like = buttons(root).find(node => isLike(node) || isUnlike(node));
       if (!like) continue;
       const text = [...root.querySelectorAll('div[dir="auto"]')]
         .filter(node => !node.querySelector('div[dir="auto"]'))
@@ -714,11 +787,21 @@
 
   async function likeComments(item, record) {
     check();
-    const keyword = item.keyword.trim().toLowerCase();
-    if (!keyword) throw new Error('Chưa có từ khóa Like CMT');
+    const rawKeyword = item.keyword.trim().toLowerCase();
+    const keywords = [];
+    if (rawKeyword) keywords.push(rawKeyword);
+    if (item.tagKude) keywords.push('@kude');
+    if (item.tagDoru) keywords.push('@doru');
 
+    if (keywords.length === 0) {
+      throw new Error('Chưa nhập từ khóa hoặc chưa tích chọn Tag để Like CMT');
+    }
+
+    const counterIndex = config.indexOf(item);
+    if (counterIndex < 0) throw new Error('Không xác định Event để đếm');
+    updateCounters(counterIndex, { expands: 0, likes: 0 });
     await chooseNewest();
-    await expandFive();
+    await expandFive(counterIndex);
 
     const rows = findComments();
     log(`Đã tìm thấy ${rows.length} bình luận để kiểm tra`);
@@ -728,7 +811,11 @@
     for (const row of rows) {
       check();
       if (count >= MAX_LIKES) break;
-      if (!row.text.toLowerCase().includes(keyword) || saved.has(row.id)) continue;
+
+      const rowTextLower = row.text.toLowerCase();
+      const matched = keywords.some(kw => rowTextLower.includes(kw));
+
+      if (!matched || saved.has(row.id)) continue;
 
       if (isUnlike(row.like)) {
         saved.add(row.id);
@@ -741,13 +828,19 @@
       row.like.click();
       await sleep(1100);
       check();
-
-      if (!isUnlike(row.like)) throw new Error('Chưa xác nhận Like CMT ' + row.id);
+      let confirmed = isUnlike(row.like);
+      for (let retry = 0; retry < 8 && !confirmed; retry++) {
+        const current = findComments().find(n => n.id === row.id);
+        confirmed = !!current && isUnlike(current.like);
+        if (!confirmed) { await sleep(300); check(); }
+      }
+      if (!confirmed) throw new Error('Chưa xác nhận Like CMT ' + row.id + '; chưa cộng bộ đếm');
 
       saved.add(row.id);
       record.likedComments = [...saved];
       saveState();
       count++;
+      updateCounters(counterIndex, { likes: count });
       log(`✓ Like CMT ${count}/${MAX_LIKES}`);
     }
     log(`Hoàn tất: ${count} Like CMT mới`);
@@ -769,26 +862,14 @@
     const selectedIndices = [];
     for (let i = 0; i < COUNT; i++) {
       const cb = $(`feh71-cb-${i}`);
-      if (cb && cb.checked) {
-        selectedIndices.push(i);
-      }
+      selectedEvents[i] = !!cb?.checked;
+      if (selectedEvents[i]) selectedIndices.push(i);
     }
+    saveEventSelection();
 
     if (selectedIndices.length === 0) {
       log('Vui lòng tích chọn ít nhất 1 Event!');
       return;
-    }
-
-    for (const idx of selectedIndices) {
-      const item = config[idx];
-      if (!validUrl(item.url.trim())) {
-        log(`Event ${idx + 1}: Link Facebook không hợp lệ!`);
-        return;
-      }
-      if (mode === 'like-comments' && !item.keyword.trim()) {
-        log(`Event ${idx + 1}: Thiếu từ khóa Like CMT!`);
-        return;
-      }
     }
 
     batchTask = {
@@ -802,6 +883,23 @@
     const firstIdx = batchTask.queue[0];
     log(`Bắt đầu chạy hàng loạt (${batchTask.queue.length} Event). Đang mở Event ${firstIdx + 1}...`);
     location.assign(config[firstIdx].url);
+  }
+
+  function resetCommentHistory() {
+    if (busy || syncing || task || batchTask) {
+      log('Hãy dừng tác vụ và chờ tác vụ dừng xong trước khi xoá lịch sử CMT.');
+      return;
+    }
+    if (!selectedProfile || !validUrl(config[tab].url)) {
+      log('Chọn Facebook Profile và nhập link Event hợp lệ trước khi xoá lịch sử CMT.');
+      return;
+    }
+    const record = recordFor(config[tab].url);
+    record.commentSent = false;
+    record.commentPending = false;
+    saveState();
+    setStatus(tab, 'Có thể chạy lại CMT');
+    log(`Đã xoá lịch sử CMT Event ${tab + 1} (${selectedProfile}). Có thể chạy lại Like + CMT; kiểm tra bình luận cũ trên Facebook để tránh trùng.`);
   }
 
   function stopBatch() {
@@ -819,7 +917,7 @@
     if (batchTask.step < batchTask.queue.length) {
       saveBatch();
       const nextIdx = batchTask.queue[batchTask.step];
-      log(`Chuyển sang Event tiếp theo trong hàng chờ: Event ${nextIdx + 1}`);
+      log(`Chuyển sang Event tiếp theo: Event ${nextIdx + 1}`);
       await sleep(1500);
       location.assign(config[nextIdx].url);
     } else {
@@ -835,9 +933,7 @@
 
     if (batchTask) {
       if (batchTask.profile !== selectedProfile) {
-        log('Profile không khớp với tiến trình hàng chờ, hủy bỏ.');
-        batchTask = null;
-        saveBatch();
+        batchTask = null; saveBatch();
         return;
       }
       currentIdx = batchTask.queue[batchTask.step];
@@ -849,13 +945,11 @@
       return;
     }
 
-    if (currentIdx < 0 || currentIdx >= COUNT || !validUrl(config[currentIdx].url)) {
-      log('Tác vụ hiện tại không hợp lệ.');
-      batchTask = null; saveBatch();
-      task = null; saveTask();
-      return;
+    if (!Number.isInteger(currentIdx) || !config[currentIdx] || !samePage(config[currentIdx].url)) {
+      log('Trang hiện tại không khớp Event; dừng để tránh thao tác nhầm bài');
+      stopBatch(); return;
     }
-
+    activeTask = task;
     busy = true;
     cancelled = false;
     tab = currentIdx;
@@ -864,21 +958,21 @@
 
     try {
       setStatus(currentIdx, 'Đang thực hiện...');
-      await sleep(1400);
+      await sleep(2500);
       check();
 
       const item = config[currentIdx];
       const record = recordFor(item.url);
 
       if (mode === 'post') {
-        log(`[Event ${currentIdx + 1}] Bước 1: Kiểm tra Like ảnh`);
+        log(`[Event ${currentIdx + 1}] Bước 1: Like ảnh chính`);
         await likePhoto(record);
         check();
-        log(`[Event ${currentIdx + 1}] Bước 2: Đăng bình luận`);
+        log(`[Event ${currentIdx + 1}] Bước 2: Đăng bình luận kèm Tag`);
         await sendComment(item, record);
         check();
       } else {
-        log(`[Event ${currentIdx + 1}] Bước 1: Lọc Newest, mở rộng và Like CMT`);
+        log(`[Event ${currentIdx + 1}] Bước 1: Lọc Newest và Like CMT`);
         await likeComments(item, record);
         check();
       }
@@ -888,23 +982,19 @@
     } catch (error) {
       if (cancelled) {
         setStatus(currentIdx, 'Đã dừng');
-        log(`Event ${currentIdx + 1} đã dừng`);
       } else {
         setStatus(currentIdx, 'Lỗi: ' + error.message);
         log(`✗ Event ${currentIdx + 1}: ${error.message}`);
+        if (batchTask) {
+          batchTask = null; saveBatch();
+          log('Đã dừng hàng chờ vì Event gặp lỗi.');
+        }
       }
     } finally {
       busy = false;
       cancelled = false;
-
-      if (task) {
-        task = null;
-        saveTask();
-      }
-
-      if (batchTask) {
-        await proceedBatchQueue();
-      }
+      if (task) { task = null; saveTask(); }
+      if (batchTask) { await proceedBatchQueue(); }
     }
   }
 
@@ -916,23 +1006,16 @@
       const button = $(`feh71-tab-${i}`);
       if (!button) continue;
       button.classList.toggle('active', i === tab);
-      button.title = `Event ${i + 1}: ${eventStatus[i]}`;
     }
-
     const item = config[tab];
-    const tags = getTags(tab);
-    if ($('feh75-tag-kude')) $('feh75-tag-kude').checked = tags.kude;
-    if ($('feh75-tag-doru')) $('feh75-tag-doru').checked = tags.doru;
-    for (const field of ['url', 'comment', 'keyword']) {
-      const node = $(`feh71-${field}`);
-      if (node) node.value = item[field];
-    }
-
-    const statusNode = $('feh71-event-status');
-    if (statusNode) statusNode.textContent = eventStatus[tab];
-
-    const current = $('feh71-current');
-    if (current) current.textContent = `Event ${tab + 1}`;
+    $('feh71-url').value = item.url;
+    $('feh71-comment').value = item.comment;
+    $('feh71-keyword').value = item.keyword;
+    $('feh71-tag-kude').checked = item.tagKude;
+    $('feh71-tag-doru').checked = item.tagDoru;
+    $('feh71-event-status').textContent = eventStatus[tab];
+    $('feh71-current').textContent = `Event ${tab + 1}`;
+    renderCounters();
   }
 
   function createPanel() {
@@ -940,39 +1023,30 @@
 
     const style = document.createElement('style');
     style.textContent = `
-      #feh71 {
-        position: fixed !important;
-        left: 12px !important;
-        bottom: 12px !important;
-        width: 420px !important;
-        max-width: calc(100vw - 24px) !important;
-        max-height: 94vh !important;
-        overflow: auto !important;
-        z-index: 2147483647 !important;
-        background: #fff !important;
-        color: #222 !important;
-        border: 1px solid #d5d8de !important;
-        border-radius: 10px !important;
-        box-shadow: 0 6px 28px #0003 !important;
-        font: 11px/1.35 Arial,sans-serif !important;
-      }
+      #feh71 { position: fixed !important; left: 12px !important; bottom: 12px !important; width: 420px !important; max-width: calc(100vw - 24px) !important; max-height: 94vh !important; overflow: auto !important; z-index: 2147483647 !important; background: #fff !important; color: #222 !important; border: 1px solid #d5d8de !important; border-radius: 10px !important; box-shadow: 0 6px 28px #0003 !important; font: 11px/1.35 Arial,sans-serif !important; }
       #feh71 * { box-sizing: border-box !important; font-family: Arial,sans-serif !important; font-size: 11px !important; line-height: 1.35 !important; }
       #feh71-head { background: #0866ff; color: #fff; padding: 9px 11px; display: flex; justify-content: space-between; cursor: pointer; font-weight: 700; }
       #feh71-body { padding: 10px; }
       #feh71 label { display: block; margin: 7px 0 3px; font-weight: 400; }
       #feh71 input, #feh71 textarea, #feh71 select { width: 100%; border: 1px solid #ccd0d5; border-radius: 5px; background: #fff; color: #222; padding: 5px 7px; outline: none; }
-      #feh71 input { height: 26px; }
-      #feh71 select { height: 28px; }
+      #feh71 input { height: 26px; } #feh71 select { height: 28px; }
       #feh71 textarea { height: 64px; resize: vertical; font-weight: 700 !important; }
       #feh71 button { border: 0; border-radius: 5px; padding: 7px 5px; cursor: pointer; color: #fff; font-weight: 600; background: #555; }
       #feh71 button:hover { opacity: 0.9; }
       .feh71-row { display: flex; gap: 6px; margin-top: 8px; }
       .feh71-row button { flex: 1; }
       .feh71-tabs { display: flex; gap: 4px; margin-bottom: 8px; }
-      .feh71-tab { flex: 1; padding: 6px 2px; text-align: center; background: #e4e6eb; color: #050505; border-radius: 4px; cursor: pointer; font-weight: 600; display: flex; flex-direction: column; align-items: center; gap: 2px; }
-      .feh71-tab.active { background: #0866ff; color: #fff; }
+      #feh71 .feh71-tab { flex: 1; margin: 0; position: relative; cursor: pointer; text-align: center; }
+      #feh71 .feh71-tab input { position: absolute; opacity: 0; width: 1px; height: 1px; padding: 0; }
+      #feh71 .feh71-event-box { display: flex; align-items: center; justify-content: center; min-height: 52px; border: 2px solid #aeb5bf; border-radius: 8px; background: #f0f2f5; color: #333; font-size: 22px !important; font-weight: 700; }
+      #feh71 .feh71-tab input:checked + .feh71-event-box { background: #0866ff; border-color: #0866ff; color: #fff; }
+      #feh71 .feh71-tab input:checked + .feh71-event-box::after { content: '✓'; font-size: 13px; position: absolute; right: 5px; top: 3px; }
+      #feh71 .feh71-tab.active .feh71-event-box { outline: 2px solid #222; outline-offset: 2px; }
+      #feh71 .feh71-tab input:focus-visible + .feh71-event-box { outline: 3px solid #f7b928; outline-offset: 2px; }
       #feh71-log { width: 100%; height: 95px; background: #f0f2f5; border: 1px solid #ccd0d5; border-radius: 5px; padding: 6px; font-family: monospace !important; font-size: 10px !important; white-space: pre-wrap; overflow-y: auto; margin-top: 8px; color: #333; }
       .batch-box { background: #f7f8fa; border: 1px solid #e4e6eb; padding: 8px; border-radius: 6px; margin-top: 8px; }
+      .tag-box { display: flex; gap: 12px; background: #e7f3ff; padding: 6px 8px; border-radius: 5px; margin-top: 4px; border: 1px solid #b6d4fe; align-items: center; }
+      .tag-box label { margin: 0 !important; font-weight: 600; color: #0866ff; cursor: pointer; display: flex; align-items: center; gap: 4px; }
     `;
     document.head.appendChild(style);
 
@@ -980,7 +1054,7 @@
     div.id = 'feh71';
     div.innerHTML = `
       <div id="feh71-head">
-        <span>Facebook Event Helper v7.5</span>
+        <span>Facebook Event Helper v8.2.1</span>
         <span id="feh71-toggle">[-]</span>
       </div>
       <div id="feh71-body">
@@ -997,10 +1071,10 @@
         <label><b>Danh sách Tab (Tích chọn để chạy hàng loạt):</b></label>
         <div class="feh71-tabs">
           ${Array.from({ length: COUNT }, (_, i) => `
-            <div class="feh71-tab" id="feh71-tab-${i}">
-              <span>E${i + 1}</span>
-              <input type="checkbox" id="feh71-cb-${i}" title="Chọn chạy Event ${i + 1}" style="width:13px; height:13px; cursor:pointer;" checked>
-            </div>
+            <label class="feh71-tab" id="feh71-tab-${i}" title="Chọn chạy Event ${i + 1}">
+              <input type="checkbox" id="feh71-cb-${i}" aria-label="Chọn chạy Event ${i + 1}" ${selectedEvents[i] ? 'checked' : ''}>
+              <span class="feh71-event-box">${i + 1}</span>
+            </label>
           `).join('')}
         </div>
 
@@ -1012,26 +1086,16 @@
         <label>Link bài viết / ảnh Event:</label>
         <input type="text" id="feh71-url" placeholder="https://www.facebook.com/...">
 
-        <label>Nội dung Bình luận (Dùng cho Like ảnh + CMT):</label>
-        <textarea id="feh71-comment" placeholder="Nhập bình luận..."></textarea>
+        <label>Nội dung Bình luận:</label>
+        <textarea id="feh71-comment" placeholder="Nhập nội dung bình luận..."></textarea>
 
-        <div class="feh75-three" style="display:grid;grid-template-columns:1.25fr 1fr 1fr;gap:6px;margin-top:8px;align-items:end;">
-          <div>
-            <label>Từ khóa Like CMT</label>
-            <input type="text" id="feh71-keyword" placeholder="Từ khóa...">
-          </div>
-          <div>
-            <label style="display:flex;align-items:center;gap:4px;white-space:nowrap;">
-              <input type="checkbox" id="feh75-tag-kude" style="width:14px;height:14px;"> Tag Kude Nohara
-            </label>
-            <input type="text" value="@Kude" readonly title="Gõ @Kude rồi chọn Kude Nohara">
-          </div>
-          <div>
-            <label style="display:flex;align-items:center;gap:4px;white-space:nowrap;">
-              <input type="checkbox" id="feh75-tag-doru" style="width:14px;height:14px;"> Tag Nè Doru
-            </label>
-            <input type="text" value="@Doru" readonly title="Gõ @Doru rồi chọn Nè Doru">
-          </div>
+        <label>Bộ lọc từ khóa & Tag người chơi:</label>
+        <input type="text" id="feh71-keyword" placeholder="Nhập từ khóa phụ (tuỳ chọn)...">
+
+        <div class="tag-box">
+          <span style="font-weight: 700; font-size: 10px; color: #333;">TAG CUỐI CMT:</span>
+          <label><input type="checkbox" id="feh71-tag-kude" style="width:13px; height:13px;"> @Kude</label>
+          <label><input type="checkbox" id="feh71-tag-doru" style="width:13px; height:13px;"> @Doru</label>
         </div>
 
         <div class="batch-box">
@@ -1044,17 +1108,24 @@
 
         <div class="feh71-row">
           <button id="feh71-stop" style="background: #fa383e;">Dừng tất cả</button>
-          <!-- NÚT BẤM CẬP NHẬT MỚI THÊM -->
-          <button id="feh71-update-script" style="background: #722ed1;" title="Cập nhật phiên bản script mới nhất từ GitHub">Cập nhật Script</button>
+          <button id="feh71-update-script" style="background: #722ed1;" title="Cập nhật phiên bản mới">Cập nhật Script</button>
         </div>
 
-        <div id="feh71-log">Nhật ký hoạt động khởi tạo...</div>
+        <div class="feh71-row">
+          <button id="feh71-reset-comment" style="background:#b45309;">Xoá lịch sử CMT — Event đang mở</button>
+        </div>
+        <div style="margin-top:5px;color:#65676b;">Chỉ xoá trạng thái CMT của Event đang mở và Profile đã chọn. Bình luận trên Facebook vẫn còn; kiểm tra bình luận cũ trước khi gửi lại.</div>
+        <div style="display:flex;gap:8px;margin-top:9px;">
+          <div style="flex:1;background:#e7f3ff;padding:9px;border-radius:6px;">Tải thêm CMT<br><b id="feh82-expands" style="font-size:18px !important;">0/10</b> lần</div>
+          <div style="flex:1;background:#e8f5e9;padding:9px;border-radius:6px;">Đã Like CMT<br><b id="feh82-likes" style="font-size:18px !important;">0/100</b></div>
+        </div>
+        <div style="margin-top:4px;color:#65676b;">Lượt Like CMT gần nhất của Event đang mở. Tải thêm đếm số lần bấm; Like chỉ đếm lượt mới đã xác nhận.</div>
+        <div id="feh71-log">Nhật ký hoạt động khởi tạo v8.2.1...</div>
       </div>
     `;
 
     document.body.appendChild(div);
 
-    // Bind events
     $('feh71-head').onclick = () => {
       const b = $('feh71-body');
       const hidden = b.style.display === 'none';
@@ -1063,6 +1134,10 @@
     };
 
     for (let i = 0; i < COUNT; i++) {
+      $(`feh71-cb-${i}`).onchange = (e) => {
+        selectedEvents[i] = e.target.checked;
+        saveEventSelection();
+      };
       $(`feh71-tab-${i}`).onclick = (e) => {
         if (e.target.tagName === 'INPUT') return;
         tab = i;
@@ -1071,50 +1146,38 @@
       };
     }
 
-    for (const field of ['url', 'comment', 'keyword']) {
-      $(`feh71-${field}`).oninput = (e) => {
-        config[tab][field] = e.target.value;
-        saveConfig();
-      };
-    }
-
-    $('feh75-tag-kude').onchange = e => saveTags(tab, 'kude', e.target.checked);
-    $('feh75-tag-doru').onchange = e => saveTags(tab, 'doru', e.target.checked);
+    $('feh71-url').oninput = (e) => { config[tab].url = e.target.value; saveConfig(); };
+    $('feh71-comment').oninput = (e) => { config[tab].comment = e.target.value; saveConfig(); };
+    $('feh71-keyword').oninput = (e) => { config[tab].keyword = e.target.value; saveConfig(); };
+    $('feh71-tag-kude').onchange = (e) => { config[tab].tagKude = e.target.checked; saveConfig(); };
+    $('feh71-tag-doru').onchange = (e) => { config[tab].tagDoru = e.target.checked; saveConfig(); };
 
     $('feh71-profile').onchange = (e) => {
       selectedProfile = e.target.value;
       profileRevision++;
       saveProfile();
       updateSync();
-      log('Đã chọn Facebook: ' + (selectedProfile || 'Trống'));
+      renderCounters();
     };
 
     $('feh71-refresh').onclick = refreshProfiles;
     $('feh71-sync').onclick = syncSheets;
-
     $('feh71-batch-post').onclick = () => startBatch('post');
     $('feh71-batch-like-cmts').onclick = () => startBatch('like-comments');
     $('feh71-stop').onclick = stopBatch;
+    $('feh71-reset-comment').onclick = resetCommentHistory;
+    $('feh71-update-script').onclick = () => { window.open(UPDATE_RAW_URL, '_blank'); };
 
-    // XỬ LÝ SỰ KIỆN CẬP NHẬT SCRIPT
-    $('feh71-update-script').onclick = () => {
-      log('Đang mở liên kết cập nhật script...');
-      window.open(
-  'https://github.com/vxtkdt/fb-event-helper/raw/refs/heads/main/fb-event-helper.user.js',
-  '_blank'
-);
-    };
-
+    saveEventSelection();
     renderProfiles();
     renderEvent();
-    log('Giao diện v7.5 (Tag Kude/Doru) đã sẵn sàng.');
+    log('Giao diện v8.2.1 đã sẵn sàng.');
   }
 
-  // Khởi động
   setTimeout(() => {
     createPanel();
     if (batchTask || task) {
-      log('Phát hiện tác vụ đang treo, tiếp tục thực thi...');
+      log('Tiếp tục tiến trình hàng chờ...');
       executeTask();
     }
   }, 1000);
