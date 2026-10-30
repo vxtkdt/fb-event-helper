@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Facebook Event Helper 7.4 - Multi Batch Runner & Auto Update
+// @name         Facebook Event Helper 7.5 - Batch & Tag
 // @namespace    fb-event-helper
-// @version      7.4
+// @version      7.5
 // @description  5 Events, Checkbox Batch Execution, Google Sheets, Nút Cập nhật nhanh
 // @match        https://www.facebook.com/*
 // @match        https://web.facebook.com/*
@@ -18,8 +18,8 @@
 (function () {
   'use strict';
 
-  if (window.__FEH74__) return;
-  window.__FEH74__ = true;
+  if (window.__FEH75__) return;
+  window.__FEH75__ = true;
 
   // ĐƯỜNG DẪN RAW GITHUB ĐỂ NÚT BẤM CẬP NHẬT TỰ ĐỘNG
   const UPDATE_RAW_URL = 'https://raw.githubusercontent.com/vxtkdt/fb-event-helper/refs/heads/main/fb-event-helper.user.js';
@@ -38,7 +38,8 @@
     sync: 'fb_event_helper_sync_v66',
     profiles: 'fb_event_helper_profiles_v70',
     tab: 'fb_event_helper_tab_v71',
-    batch: 'fb_event_helper_batch_v73'
+    batch: 'fb_event_helper_batch_v73',
+    tags: 'fb_event_helper_tags_v75'
   };
 
   const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -81,6 +82,19 @@
   if (!state || typeof state !== 'object') state = { records: {} };
   state.records ||= {};
 
+  // Cài đặt Tag riêng cho từng Event, không bị ghi đè khi đồng bộ Sheets.
+  let tagSettings = store(K.tags, {});
+  if (!tagSettings || typeof tagSettings !== 'object') tagSettings = {};
+  function tagKey(index) { return selectedProfile + '::' + index; }
+  function getTags(index) {
+    const v = tagSettings[tagKey(index)] || {};
+    return { kude: !!v.kude, doru: !!v.doru };
+  }
+  function saveTags(index, name, value) {
+    tagSettings[tagKey(index)] = { ...getTags(index), [name]: !!value };
+    GM_setValue(K.tags, tagSettings);
+  }
+
   let task = store(K.task, null);
   let batchTask = store(K.batch, null);
 
@@ -112,7 +126,7 @@
 
   function log(message) {
     const line = `[${new Date().toLocaleTimeString('vi-VN')}] ${message}`;
-    console.log('[FEH 7.4]', message);
+    console.log('[FEH 7.5]', message);
     const box = $('feh71-log');
     if (box) {
       box.textContent += (box.textContent ? '\n' : '') + line;
@@ -438,6 +452,80 @@
     return null;
   }
 
+  // Facebook mention chỉ hợp lệ khi chọn kết quả gợi ý,
+  // không phải khi chèn chuỗi @Kude hoặc @Doru đơn thuần.
+  function moveCaretToEnd(editor) {
+    editor.focus();
+    const range = document.createRange();
+    range.selectNodeContents(editor);
+    range.collapse(false);
+    const selection = getSelection();
+    selection.removeAllRanges();
+    selection.addRange(range);
+  }
+
+  function insertAtCaret(editor, value) {
+    moveCaretToEnd(editor);
+    return document.execCommand('insertText', false, value);
+  }
+
+  function mentionNodes() {
+    return [...document.querySelectorAll(
+      '[role="option"],[role="listbox"] [role="button"],[role="menuitem"],[data-visualcompletion="ignore-dynamic"] [role="button"]'
+    )].filter(node => visible(node) && !node.closest('#feh71'));
+  }
+
+  function exactMentionOption(fullName) {
+    const wanted = norm(fullName).toLocaleLowerCase('vi-VN');
+    const candidates = mentionNodes().filter(node => {
+      const own = norm(node.innerText || node.textContent || '');
+      const lines = own.split(/\n/).map(norm).filter(Boolean);
+      return lines.some(line => line.toLocaleLowerCase('vi-VN') === wanted) ||
+        own.toLocaleLowerCase('vi-VN') === wanted;
+    });
+    // Không chọn bừa khi có nhiều kết quả trùng tên.
+    return candidates.length === 1 ? candidates[0] : null;
+  }
+
+  function hasMentionEntity(editor, name) {
+    const wanted = norm(name).toLocaleLowerCase('vi-VN');
+    return [...editor.querySelectorAll(
+      'a[href], [data-entity-id], [data-mention-id], [contenteditable="false"]'
+    )].some(node => {
+      const t = norm(node.innerText || node.textContent).toLocaleLowerCase('vi-VN');
+      return t === wanted && (
+        node.matches('a[href], [data-entity-id], [data-mention-id]') ||
+        !!node.closest('a[href], [data-entity-id], [data-mention-id]') ||
+        node.getAttribute('contenteditable') === 'false'
+      );
+    });
+  }
+
+  async function addMention(editor, shortName, fullName) {
+    check();
+    if (!insertAtCaret(editor, ' @' + shortName)) {
+      throw new Error('Không nhập được @' + shortName);
+    }
+    log('Đang tìm Tag: ' + fullName);
+    let option = null;
+    for (let i = 0; i < 20; i++) {
+      check();
+      option = exactMentionOption(fullName);
+      if (option) break;
+      await sleep(300);
+    }
+    if (!option) {
+      throw new Error('Không thấy đúng gợi ý Tag ' + fullName + '; chưa đăng CMT');
+    }
+    option.click();
+    await sleep(650);
+    check();
+    if (!hasMentionEntity(editor, fullName)) {
+      throw new Error('Chưa xác nhận được Tag thật ' + fullName + '; chưa đăng CMT');
+    }
+    log('✓ Đã chọn Tag ' + fullName);
+  }
+
   async function sendComment(item, record) {
     check();
     const text = item.comment.trim();
@@ -458,12 +546,25 @@
 
     const beforeCount = commentCount();
     if (!enterText(editor, text)) throw new Error('Không nhập được nội dung CMT');
+    if (norm(editor.innerText) !== norm(text)) {
+      throw new Error('Nội dung CMT không khớp');
+    }
 
-    log('Đã nhập CMT, chờ 2 giây...');
+    const settings = getTags(config.indexOf(item));
+    if (settings.kude) await addMention(editor, 'Kude', 'Kude Nohara');
+    if (settings.doru) await addMention(editor, 'Doru', 'Nè Doru');
+
+    // Kiểm tra lại trước khi gửi; Facebook có thể thay đổi DOM.
+    if (settings.kude && !hasMentionEntity(editor, 'Kude Nohara')) {
+      throw new Error('Tag Kude Nohara không còn hợp lệ; chưa đăng CMT');
+    }
+    if (settings.doru && !hasMentionEntity(editor, 'Nè Doru')) {
+      throw new Error('Tag Nè Doru không còn hợp lệ; chưa đăng CMT');
+    }
+
+    log('Đã chuẩn bị CMT, chờ 2 giây...');
     await sleep(2000);
     check();
-
-    if (norm(editor.innerText) !== norm(text)) throw new Error('Nội dung CMT không khớp');
 
     let sendButton = null;
     for (let i = 0; i < 20; i++) {
@@ -819,6 +920,9 @@
     }
 
     const item = config[tab];
+    const tags = getTags(tab);
+    if ($('feh75-tag-kude')) $('feh75-tag-kude').checked = tags.kude;
+    if ($('feh75-tag-doru')) $('feh75-tag-doru').checked = tags.doru;
     for (const field of ['url', 'comment', 'keyword']) {
       const node = $(`feh71-${field}`);
       if (node) node.value = item[field];
@@ -876,7 +980,7 @@
     div.id = 'feh71';
     div.innerHTML = `
       <div id="feh71-head">
-        <span>Facebook Event Helper v7.4</span>
+        <span>Facebook Event Helper v7.5</span>
         <span id="feh71-toggle">[-]</span>
       </div>
       <div id="feh71-body">
@@ -911,8 +1015,24 @@
         <label>Nội dung Bình luận (Dùng cho Like ảnh + CMT):</label>
         <textarea id="feh71-comment" placeholder="Nhập bình luận..."></textarea>
 
-        <label>Từ khóa lọc Like Comment:</label>
-        <input type="text" id="feh71-keyword" placeholder="Nhập từ khóa...">
+        <div class="feh75-three" style="display:grid;grid-template-columns:1.25fr 1fr 1fr;gap:6px;margin-top:8px;align-items:end;">
+          <div>
+            <label>Từ khóa Like CMT</label>
+            <input type="text" id="feh71-keyword" placeholder="Từ khóa...">
+          </div>
+          <div>
+            <label style="display:flex;align-items:center;gap:4px;white-space:nowrap;">
+              <input type="checkbox" id="feh75-tag-kude" style="width:14px;height:14px;"> Tag Kude Nohara
+            </label>
+            <input type="text" value="@Kude" readonly title="Gõ @Kude rồi chọn Kude Nohara">
+          </div>
+          <div>
+            <label style="display:flex;align-items:center;gap:4px;white-space:nowrap;">
+              <input type="checkbox" id="feh75-tag-doru" style="width:14px;height:14px;"> Tag Nè Doru
+            </label>
+            <input type="text" value="@Doru" readonly title="Gõ @Doru rồi chọn Nè Doru">
+          </div>
+        </div>
 
         <div class="batch-box">
           <div style="font-weight: 700; margin-bottom: 4px; color: #0866ff;">⚡ Chạy hàng loạt các Event được tích chọn:</div>
@@ -958,6 +1078,9 @@
       };
     }
 
+    $('feh75-tag-kude').onchange = e => saveTags(tab, 'kude', e.target.checked);
+    $('feh75-tag-doru').onchange = e => saveTags(tab, 'doru', e.target.checked);
+
     $('feh71-profile').onchange = (e) => {
       selectedProfile = e.target.value;
       profileRevision++;
@@ -981,7 +1104,7 @@
 
     renderProfiles();
     renderEvent();
-    log('Giao diện v7.4 (Đã tích hợp Cập nhật) đã sẵn sàng.');
+    log('Giao diện v7.5 (Tag Kude/Doru) đã sẵn sàng.');
   }
 
   // Khởi động
