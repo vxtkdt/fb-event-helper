@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Facebook Event Helper 8.6 - Batch Controller & Native Input
+// @name         Facebook Event Helper 8.7 - Batch Controller & Native Input
 // @namespace    fb-event-helper
-// @version      8.6
+// @version      8.7
 // @description  5 Events, Checkbox Batch, Xác nhận Like bài viết và Tag trước khi gửi
 // @match        https://www.facebook.com/*
 // @match        https://web.facebook.com/*
@@ -49,7 +49,24 @@
   };
 
   const SHARED_KEYS = { ...K };
-  for (const field of ['config', 'task', 'profile', 'sync', 'tab', 'batch']) K[field] = scoped(K[field]);
+  for (const field of ['task', 'batch']) K[field] = scoped(K[field]);
+
+  // Preferences belong to this installed script/browser profile, not an individual tab.
+  // Reuse the stable 8.2.2 keys. Import the current 8.6 tab once when available.
+  const PREFS_MIGRATION_KEY = 'fb_event_helper_preferences_migrated_v861';
+  if (!store(PREFS_MIGRATION_KEY, false)) {
+    for (const field of ['config', 'profile', 'sync', 'tab']) {
+      const value = store(scoped(SHARED_KEYS[field]), undefined);
+      const valid = field === 'config' ? Array.isArray(value) :
+        field === 'tab' ? Number.isInteger(value) && value >= 0 && value < COUNT : typeof value === 'string';
+      if (valid) GM_setValue(SHARED_KEYS[field], value);
+    }
+    for (const key of ['fb_event_helper_selected_events_v821', 'fb_event_helper_counters_v82']) {
+      const value = store(scoped(key), undefined);
+      if (value !== undefined) GM_setValue(key, value);
+    }
+    GM_setValue(PREFS_MIGRATION_KEY, true);
+  }
 
   const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
   function confirmationTimeout() { return document.hidden ? 120000 : 15000; }
@@ -121,7 +138,7 @@
 
   const eventStatus = Array.from({ length: COUNT }, () => 'Sẵn sàng');
 
-  const SELECTION_KEY = scoped('fb_event_helper_selected_events_v821');
+  const SELECTION_KEY = 'fb_event_helper_selected_events_v821';
   function loadEventSelection() {
     const saved = store(SELECTION_KEY, store('fb_event_helper_selected_events_v821', null));
     if (Array.isArray(saved) && saved.length === COUNT && saved.every(value => typeof value === 'boolean')) return [...saved];
@@ -134,7 +151,7 @@
   let selectedEvents = loadEventSelection();
   function saveEventSelection() { GM_setValue(SELECTION_KEY, [...selectedEvents]); }
 
-  const COUNTER_KEY = scoped('fb_event_helper_counters_v82');
+  const COUNTER_KEY = 'fb_event_helper_counters_v82';
   let runCounters = store(COUNTER_KEY, {});
   if (!runCounters || typeof runCounters !== 'object' || Array.isArray(runCounters)) runCounters = {};
 
@@ -151,6 +168,12 @@
     runCounters[counterKey(index)] = { ...countersFor(index), ...values };
     GM_setValue(COUNTER_KEY, runCounters);
     if (index === tab) renderCounters();
+    if (controlJob && controlJob.phase === 'like-comments') {
+      controlJob.events ||= [];
+      controlJob.events[index] = { ...controlJob.events[index], index, ...countersFor(index) };
+      saveControlJob();
+      void controlPublish('running', `Event ${index + 1}: tải thêm ${countersFor(index).expands} lần, Like ${countersFor(index).likes} CMT mới`).catch(error => log('BỘ ĐIỀU PHỐI: ' + error.message));
+    }
   }
 
   function saveConfig() { GM_setValue(K.config, config); }
@@ -171,16 +194,16 @@
     return new Promise((resolve, reject) => {
       const id = crypto.randomUUID();
       const onMessage = event => {
-        if (event.source !== window || event.origin !== location.origin ||
-            event.data?.channel !== 'feh-batch-reply' || event.data.id !== id) return;
+        let reply; try { reply = JSON.parse(event.detail); } catch { return; }
+        if (reply?.id !== id) return;
         cleanup();
-        if (event.data.ok) resolve(event.data.result); else reject(new Error(event.data.error || 'Bộ điều khiển báo lỗi'));
+        if (reply.ok) resolve(reply.result); else reject(new Error(reply.error || 'Bộ điều khiển báo lỗi'));
       };
-      const timer = setTimeout(() => { cleanup(); reject(new Error('Bộ điều khiển không phản hồi; chưa gửi lại')); }, 45000);
-      function cleanup() { clearTimeout(timer); window.removeEventListener('message', onMessage); }
-      window.addEventListener('message', onMessage);
-      window.postMessage({ channel: 'feh-batch-request', id,
-        request: { ...request, jobId: job.id, nonce: job.nonce } }, location.origin);
+      const timer = setTimeout(() => { cleanup(); reject(new Error('Bộ điều khiển không phản hồi; kiểm tra tiện ích 0.3.0 và script 8.7')); }, 45000);
+      function cleanup() { clearTimeout(timer); document.removeEventListener('feh-batch-wire-reply', onMessage); }
+      document.addEventListener('feh-batch-wire-reply', onMessage);
+      document.dispatchEvent(new CustomEvent('feh-batch-wire-request', { detail: JSON.stringify({ id,
+        request: { ...request, jobId: job.id, nonce: job.nonce } }) }));
     });
   }
   function controlPublish(state, message, job = controlJob) {
@@ -204,7 +227,8 @@
     if (controlJob || task || batchTask || busy) stopBatch();
   });
   document.addEventListener('feh-control-start', event => {
-    void startControlledJob(event.detail).catch(error => {
+    let job; try { job = typeof event.detail === 'string' ? JSON.parse(event.detail) : event.detail; } catch { return; }
+    void startControlledJob(job).catch(error => {
       log('HÀNG LOẠT: ' + error.message);
       batchTask = null; saveBatch(); task = null; saveTask();
       controlFinish('failed', error.message);
@@ -217,7 +241,9 @@
       await controlPublish('failed', 'Profile còn tác vụ cũ; không tự chạy trùng.', rejected);
       return;
     }
-    controlJob = { ...job, events: Array.from({ length: COUNT }, (_, index) => ({ index, state: 'waiting' })) };
+    const mode = job.mode || 'post';
+    if (!['post', 'like-comments', 'both'].includes(mode)) throw new Error('Chế độ chạy không hợp lệ');
+    controlJob = { ...job, mode, phase: mode === 'like-comments' ? 'like-comments' : 'post', events: Array.from({ length: COUNT }, (_, index) => ({ index, state: 'waiting', postState: 'waiting', likeState: 'waiting', expands: 0, likes: 0 })) };
     saveControlJob();
     await controlPublish('running', 'Đang kiểm tra profile và đồng bộ');
     const data = await apiGet();
@@ -231,9 +257,10 @@
     const synced = await syncSheets();
     if (!synced) throw new Error('Đồng bộ lỗi; không dùng cấu hình cũ để chạy');
     for (let i = 0; i < COUNT; i++) {
-      if (!validUrl(config[i].url) || (!config[i].comment.trim() && !config[i].tagKude && !config[i].tagDoru)) {
+      if (!validUrl(config[i].url) || (mode !== 'like-comments' && !config[i].comment.trim() && !config[i].tagKude && !config[i].tagDoru)) {
         throw new Error('Event ' + (i + 1) + ' thiếu link hoặc nội dung CMT; chưa chạy');
       }
+      if (mode !== 'post' && !config[i].keyword.trim() && !config[i].tagKude && !config[i].tagDoru) throw new Error('Event ' + (i + 1) + ' thiếu bộ lọc Like CMT; chưa chạy');
       selectedEvents[i] = true;
       const checkbox = $(`feh71-cb-${i}`); if (!checkbox) throw new Error('Thiếu ô chọn Event ' + (i + 1));
       checkbox.checked = true;
@@ -241,14 +268,14 @@
     saveEventSelection();
     const permission = await bridgeRequest({ op: 'permission' });
     if (!permission?.allowed || !controlJob) { stopBatch(); return; }
-    await controlPublish('running', 'Đã đồng bộ, chọn đủ 5 Event; bắt đầu Like + CMT');
-    startBatch('post');
+    await controlPublish('running', 'Đã đồng bộ, chọn đủ 5 Event; bắt đầu ' + (controlJob.phase === 'post' ? 'Like + CMT' : 'Like bình luận'));
+    startBatch(controlJob.phase);
     if (!batchTask) throw new Error('Không khởi tạo được hàng chờ Event');
   }
 
   function log(message) {
     const line = `[${new Date().toLocaleTimeString('vi-VN')}] ${message}`;
-    console.log('[FEH 8.6]', message);
+    console.log('[FEH 8.7]', message);
     const box = $('feh71-log');
     if (box) {
       box.textContent += (box.textContent ? '\n' : '') + line;
@@ -261,7 +288,10 @@
     eventStatus[index] = message;
     if (controlJob) {
       controlJob.events ||= [];
-      controlJob.events[index] = { index, state: message === '✓ Hoàn tất' ? 'done' : message.startsWith('Lỗi:') ? 'failed' : 'running', message };
+      const phase = controlJob.phase || 'post';
+      const progressState = message === '✓ Hoàn tất' ? 'done' : message.startsWith('Lỗi:') ? 'failed' : 'running';
+      controlJob.events[index] = { ...controlJob.events[index], index, state: progressState,
+        stage: phase, [phase === 'post' ? 'postState' : 'likeState']: progressState, message };
       saveControlJob();
       void controlPublish('running', `Event ${index + 1}: ${message}`).catch(error => log('BỘ ĐIỀU PHỐI: ' + error.message));
     }
@@ -299,8 +329,8 @@
 
   function isUnlike(node) {
     const text = label(node);
-    return /^(Unlike|Remove Like|Change Like reaction|Gỡ Thích|Đã thích|Bỏ thích)$/i.test(text) || 
-           node.getAttribute('aria-pressed') === 'true' || 
+    return /^(Unlike|Remove Like|Change Like reaction|Gỡ Thích|Đã thích|Bỏ thích)$/i.test(text) ||
+           node.getAttribute('aria-pressed') === 'true' ||
            /Đã thích/i.test(text);
   }
 
@@ -809,7 +839,7 @@
     if (!editor) throw new Error('Không tìm thấy ô bình luận');
 
     const beforeCount = commentCount();
-    
+
     await typeAndTag(editor, text, item.tagKude, item.tagDoru);
 
     log('Đã nhập nội dung và Tag, đang tìm nút gửi...');
@@ -1076,7 +1106,19 @@
       log('✓ Hoàn tất tất cả các Event trong hàng chờ!');
       batchTask = null;
       saveBatch();
-      controlFinish('complete', 'Hoàn tất 5/5 Event');
+      if (controlJob?.mode === 'both' && controlJob.phase === 'post') {
+        controlJob.phase = 'like-comments';
+        controlJob.events = controlJob.events.map(e => ({ ...e, state: 'waiting', likeState: 'waiting', stage: 'like-comments' }));
+        saveControlJob();
+        try {
+          await controlPublish('running', 'Đã xong 5 Event Like + CMT; chuyển sang Like bình luận');
+          if (!controlJob || cancelled) return;
+          startBatch('like-comments');
+          if (!batchTask) throw new Error('Không khởi tạo được lượt Like bình luận');
+        } catch (error) { controlFinish('failed', error.message); }
+      } else {
+        controlFinish('complete', 'Hoàn tất 5/5 Event ở chế độ ' + (controlJob?.phase === 'like-comments' ? 'Like bình luận' : 'Like + CMT'));
+      }
     }
   }
 
@@ -1208,7 +1250,7 @@
     div.id = 'feh71';
     div.innerHTML = `
       <div id="feh71-head">
-        <span>Facebook Event Helper v8.6</span>
+        <span>Facebook Event Helper v8.7</span>
         <span id="feh71-toggle">[-]</span>
       </div>
       <div id="feh71-body">
@@ -1245,7 +1287,7 @@
 
         <label>Bộ lọc từ khóa & Tag người chơi:</label>
         <input type="text" id="feh71-keyword" placeholder="Nhập từ khóa phụ (tuỳ chọn)...">
-        
+
         <div class="tag-box">
           <span style="font-weight: 700; font-size: 10px; color: #333;">TAG CUỐI CMT:</span>
           <label><input type="checkbox" id="feh71-tag-kude" style="width:13px; height:13px;"> @Kude</label>
@@ -1334,7 +1376,7 @@
     saveProfile();
     renderProfiles();
     renderEvent();
-    log('Giao diện v8.6 đã sẵn sàng. Tab chạy độc lập, không tạm dừng khi chuyển tab.');
+    log('Giao diện v8.7 đã sẵn sàng. Tab chạy độc lập, không tạm dừng khi chuyển tab.');
   }
 
   setTimeout(async () => {
@@ -1342,13 +1384,13 @@
     if (controlJob) {
       try {
         const permission = await bridgeRequest({ op: 'permission' });
-        if (!permission?.allowed) { stopBatch(); document.documentElement.setAttribute('data-feh-control-ready', '8.6'); return; }
+        if (!permission?.allowed) { stopBatch(); document.documentElement.setAttribute('data-feh-control-ready', '8.7'); return; }
       } catch (error) {
         stopBatch(); log('BỘ ĐIỀU PHỐI: ' + error.message);
-        document.documentElement.setAttribute('data-feh-control-ready', '8.6'); return;
+        document.documentElement.setAttribute('data-feh-control-ready', '8.7'); return;
       }
     }
-    document.documentElement.setAttribute('data-feh-control-ready', '8.6');
+    document.documentElement.setAttribute('data-feh-control-ready', '8.7');
     if (batchTask || task) {
       log('Tiếp tục tiến trình hàng chờ...');
       executeTask();
