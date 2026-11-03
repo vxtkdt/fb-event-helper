@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Facebook Event Helper 8.2.2 - Robust Photo Like & Tag
+// @name         Facebook Event Helper 8.3 - Robust Photo Like & Tag
 // @namespace    fb-event-helper
-// @version      8.2.2
+// @version      8.3
 // @description  5 Events, Checkbox Batch, Xác nhận Like bài viết và Tag trước khi gửi
 // @match        https://www.facebook.com/*
 // @match        https://web.facebook.com/*
@@ -28,6 +28,15 @@
   const MAX_LIKES = 100;
   const MAX_EXPANDS = 10;
 
+  // sessionStorage survives this tab's navigation, and separates its saved runner.
+  const SESSION_KEY = 'fb_event_helper_runner_v83';
+  let runnerId = sessionStorage.getItem(SESSION_KEY);
+  if (!runnerId) {
+    runnerId = crypto.randomUUID();
+    sessionStorage.setItem(SESSION_KEY, runnerId);
+  }
+  const scoped = key => key + '::runner::' + runnerId;
+
   const K = {
     config: 'fb_event_helper_v71_config',
     state: 'fb_event_helper_state_v56',
@@ -39,7 +48,11 @@
     batch: 'fb_event_helper_batch_v73'
   };
 
+  const SHARED_KEYS = { ...K };
+  for (const field of ['config', 'task', 'profile', 'sync', 'tab', 'batch']) K[field] = scoped(K[field]);
+
   const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+  function confirmationTimeout() { return document.hidden ? 120000 : 15000; }
   const $ = id => document.getElementById(id);
   const norm = value => String(value || '').replace(/\s+/g, ' ').trim();
 
@@ -61,13 +74,13 @@
 
   let config = store(
     K.config,
-    Array.from({ length: COUNT }, (_, i) => ({
+    store(SHARED_KEYS.config, Array.from({ length: COUNT }, (_, i) => ({
       url: String(older[i]?.url || ''),
       comment: String(older[i]?.comment || ''),
       keyword: String(older[i]?.keyword || ''),
       tagKude: Boolean(older[i]?.tagKude || false),
       tagDoru: Boolean(older[i]?.tagDoru || false)
-    }))
+    })))
   );
 
   if (!Array.isArray(config)) config = [];
@@ -79,15 +92,21 @@
     tagDoru: Boolean(config[i]?.tagDoru || false)
   }));
 
-  let state = store(K.state, legacy(K.state, { records: {} }));
-  if (!state || typeof state !== 'object') state = { records: {} };
-  state.records ||= {};
-
   let task = store(K.task, null);
   let batchTask = store(K.batch, null);
 
-  let selectedProfile = store(K.profile, localStorage.getItem(K.profile) || '');
-  let syncedProfile = store(K.sync, localStorage.getItem(K.sync) || '');
+  let selectedProfile = store(K.profile, store(SHARED_KEYS.profile, localStorage.getItem(SHARED_KEYS.profile) || ''));
+  let syncedProfile = store(K.sync, store(SHARED_KEYS.sync, localStorage.getItem(SHARED_KEYS.sync) || ''));
+  function profileStateKey() { return K.state + '::profile::' + selectedProfile; }
+  function loadProfileState() {
+    const saved = store(profileStateKey(), null);
+    if (saved && typeof saved === 'object' && saved.records) return saved;
+    const previous = store(SHARED_KEYS.state, legacy(SHARED_KEYS.state, { records: {} }));
+    const prefix = selectedProfile + '::';
+    return { records: Object.fromEntries(Object.entries(previous?.records || {}).filter(([key]) => key.startsWith(prefix))) };
+  }
+  let state = loadProfileState();
+
   let profiles = store(K.profiles, []);
   if (!Array.isArray(profiles)) profiles = [];
 
@@ -102,9 +121,9 @@
 
   const eventStatus = Array.from({ length: COUNT }, () => 'Sẵn sàng');
 
-  const SELECTION_KEY = 'fb_event_helper_selected_events_v821';
+  const SELECTION_KEY = scoped('fb_event_helper_selected_events_v821');
   function loadEventSelection() {
-    const saved = store(SELECTION_KEY, null);
+    const saved = store(SELECTION_KEY, store('fb_event_helper_selected_events_v821', null));
     if (Array.isArray(saved) && saved.length === COUNT && saved.every(value => typeof value === 'boolean')) return [...saved];
     // On first upgrade, retain the active queue instead of showing all Events selected.
     if (Array.isArray(batchTask?.queue) && batchTask.queue.length) {
@@ -115,7 +134,7 @@
   let selectedEvents = loadEventSelection();
   function saveEventSelection() { GM_setValue(SELECTION_KEY, [...selectedEvents]); }
 
-  const COUNTER_KEY = 'fb_event_helper_counters_v82';
+  const COUNTER_KEY = scoped('fb_event_helper_counters_v82');
   let runCounters = store(COUNTER_KEY, {});
   if (!runCounters || typeof runCounters !== 'object' || Array.isArray(runCounters)) runCounters = {};
 
@@ -135,7 +154,7 @@
   }
 
   function saveConfig() { GM_setValue(K.config, config); }
-  function saveState() { GM_setValue(K.state, state); }
+  function saveState() { GM_setValue(profileStateKey(), state); }
   function saveTask() { GM_setValue(K.task, task); }
   function saveBatch() { GM_setValue(K.batch, batchTask); }
 
@@ -146,7 +165,7 @@
 
   function log(message) {
     const line = `[${new Date().toLocaleTimeString('vi-VN')}] ${message}`;
-    console.log('[FEH 8.2.2]', message);
+    console.log('[FEH 8.3]', message);
     const box = $('feh71-log');
     if (box) {
       box.textContent += (box.textContent ? '\n' : '') + line;
@@ -191,8 +210,8 @@
 
   function isUnlike(node) {
     const text = label(node);
-    return /^(Unlike|Remove Like|Change Like reaction|Gỡ Thích|Đã thích|Bỏ thích)$/i.test(text) ||
-           node.getAttribute('aria-pressed') === 'true' ||
+    return /^(Unlike|Remove Like|Change Like reaction|Gỡ Thích|Đã thích|Bỏ thích)$/i.test(text) || 
+           node.getAttribute('aria-pressed') === 'true' || 
            /Đã thích/i.test(text);
   }
 
@@ -464,7 +483,7 @@
 
   async function likePhoto(record) {
     check();
-    // Recheck the page: 8.2.2 wrote postLiked=true even when it failed.
+    // Recheck the page: 8.3 wrote postLiked=true even when it failed.
     let button = null;
     for (let i = 0; i < 16; i++) {
       check();
@@ -670,7 +689,7 @@
     if (!editor) throw new Error('Không tìm thấy ô bình luận');
 
     const beforeCount = commentCount();
-
+    
     await typeAndTag(editor, text, item.tagKude, item.tagDoru);
 
     log('Đã nhập nội dung và Tag, đang tìm nút gửi...');
@@ -693,8 +712,10 @@
     log('Đã nhấn đăng CMT, đang xác nhận...');
 
     const started = Date.now();
-    while (Date.now() - started < 15000) {
+    let allowedWait = confirmationTimeout();
+    while (Date.now() - started < allowedWait) {
       check();
+      if (document.hidden) allowedWait = 120000;
       const cleared = norm(editor.innerText).length === 0;
       const appeared = (text && visibleComment(text)) || commentCount() > beforeCount;
       if (cleared && appeared) {
@@ -873,6 +894,8 @@
       if (selectedEvents[i]) selectedIndices.push(i);
     }
     saveEventSelection();
+    saveConfig();
+    saveProfile();
 
     if (selectedIndices.length === 0) {
       log('Vui lòng tích chọn ít nhất 1 Event!');
@@ -1061,7 +1084,7 @@
     div.id = 'feh71';
     div.innerHTML = `
       <div id="feh71-head">
-        <span>Facebook Event Helper v8.2.2</span>
+        <span>Facebook Event Helper v8.3</span>
         <span id="feh71-toggle">[-]</span>
       </div>
       <div id="feh71-body">
@@ -1098,7 +1121,7 @@
 
         <label>Bộ lọc từ khóa & Tag người chơi:</label>
         <input type="text" id="feh71-keyword" placeholder="Nhập từ khóa phụ (tuỳ chọn)...">
-
+        
         <div class="tag-box">
           <span style="font-weight: 700; font-size: 10px; color: #333;">TAG CUỐI CMT:</span>
           <label><input type="checkbox" id="feh71-tag-kude" style="width:13px; height:13px;"> @Kude</label>
@@ -1127,7 +1150,7 @@
           <div style="flex:1;background:#e8f5e9;padding:9px;border-radius:6px;">Đã Like CMT<br><b id="feh82-likes" style="font-size:18px !important;">0/100</b></div>
         </div>
         <div style="margin-top:4px;color:#65676b;">Lượt Like CMT gần nhất của Event đang mở. Tải thêm đếm số lần bấm; Like chỉ đếm lượt mới đã xác nhận.</div>
-        <div id="feh71-log">Nhật ký hoạt động khởi tạo v8.2.2...</div>
+        <div id="feh71-log">Nhật ký hoạt động khởi tạo v8.3...</div>
       </div>
     `;
 
@@ -1160,7 +1183,14 @@
     $('feh71-tag-doru').onchange = (e) => { config[tab].tagDoru = e.target.checked; saveConfig(); };
 
     $('feh71-profile').onchange = (e) => {
+      if (busy || syncing || task || batchTask) {
+        e.target.value = selectedProfile;
+        log('Dừng tác vụ của tab này trước khi đổi Profile. Các tab khác vẫn chạy riêng.');
+        return;
+      }
       selectedProfile = e.target.value;
+      state = loadProfileState();
+      syncedProfile = '';
       profileRevision++;
       saveProfile();
       updateSync();
@@ -1176,9 +1206,11 @@
     $('feh71-update-script').onclick = () => { window.open(UPDATE_RAW_URL, '_blank'); };
 
     saveEventSelection();
+    saveConfig();
+    saveProfile();
     renderProfiles();
     renderEvent();
-    log('Giao diện v8.2.2 đã sẵn sàng.');
+    log('Giao diện v8.3 đã sẵn sàng. Tab chạy độc lập, không tạm dừng khi chuyển tab.');
   }
 
   setTimeout(() => {
