@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Facebook Event Helper 8.3 - Robust Photo Like & Tag
+// @name         Facebook Event Helper 8.6 - Batch Controller & Native Input
 // @namespace    fb-event-helper
-// @version      8.3
+// @version      8.6
 // @description  5 Events, Checkbox Batch, Xác nhận Like bài viết và Tag trước khi gửi
 // @match        https://www.facebook.com/*
 // @match        https://web.facebook.com/*
@@ -163,9 +163,92 @@
     GM_setValue(K.sync, syncedProfile);
   }
 
+  const CONTROL_KEY = scoped('fb_event_helper_control_v86');
+  let controlJob = store(CONTROL_KEY, null);
+  function saveControlJob() { GM_setValue(CONTROL_KEY, controlJob); }
+  function bridgeRequest(request, job = controlJob) {
+    if (!job) return Promise.reject(new Error('Chưa có tác vụ hàng loạt.'));
+    return new Promise((resolve, reject) => {
+      const id = crypto.randomUUID();
+      const onMessage = event => {
+        if (event.source !== window || event.origin !== location.origin ||
+            event.data?.channel !== 'feh-batch-reply' || event.data.id !== id) return;
+        cleanup();
+        if (event.data.ok) resolve(event.data.result); else reject(new Error(event.data.error || 'Bộ điều khiển báo lỗi'));
+      };
+      const timer = setTimeout(() => { cleanup(); reject(new Error('Bộ điều khiển không phản hồi; chưa gửi lại')); }, 45000);
+      function cleanup() { clearTimeout(timer); window.removeEventListener('message', onMessage); }
+      window.addEventListener('message', onMessage);
+      window.postMessage({ channel: 'feh-batch-request', id,
+        request: { ...request, jobId: job.id, nonce: job.nonce } }, location.origin);
+    });
+  }
+  function controlPublish(state, message, job = controlJob) {
+    if (!job) return Promise.resolve();
+    return bridgeRequest({ op: 'report', state, message,
+      events: Array.from({ length: COUNT }, (_, i) => job.events?.[i] || { index: i, state: 'waiting' }) }, job);
+  }
+  function controlFinish(state, message) {
+    const job = controlJob;
+    controlJob = null; saveControlJob();
+    void controlPublish(state, message, job).catch(error => log('BỘ ĐIỀU PHỐI: ' + error.message));
+  }
+  async function insertNative(editor, text) {
+    check(); moveEnd(editor);
+    if (!controlJob) return document.execCommand('insertText', false, text);
+    const result = await bridgeRequest({ op: 'insert', text });
+    check();
+    return result?.ok === true;
+  }
+  document.addEventListener('feh-control-stop', () => {
+    if (controlJob || task || batchTask || busy) stopBatch();
+  });
+  document.addEventListener('feh-control-start', event => {
+    void startControlledJob(event.detail).catch(error => {
+      log('HÀNG LOẠT: ' + error.message);
+      batchTask = null; saveBatch(); task = null; saveTask();
+      controlFinish('failed', error.message);
+    });
+  });
+  async function startControlledJob(job) {
+    if (!job?.id || !job?.nonce || !job?.profileLabel) throw new Error('Thiếu thông tin tác vụ');
+    if (busy || syncing || task || batchTask || controlJob) {
+      const rejected = { ...job, events: [] };
+      await controlPublish('failed', 'Profile còn tác vụ cũ; không tự chạy trùng.', rejected);
+      return;
+    }
+    controlJob = { ...job, events: Array.from({ length: COUNT }, (_, index) => ({ index, state: 'waiting' })) };
+    saveControlJob();
+    await controlPublish('running', 'Đang kiểm tra profile và đồng bộ');
+    const data = await apiGet();
+    if (!Array.isArray(data.profiles)) throw new Error('Danh sách Profile từ Sheets không hợp lệ');
+    profiles = data.profiles.map(String); GM_setValue(K.profiles, profiles);
+    const requested = norm(job.profileLabel).normalize('NFC').toLocaleLowerCase('vi-VN');
+    const matches = profiles.filter(name => norm(name).normalize('NFC').toLocaleLowerCase('vi-VN') === requested);
+    if (matches.length !== 1) throw new Error('Không tìm thấy duy nhất Profile Sheets: ' + job.profileLabel + '. Kiểm tra tên trên bảng chung; chưa chạy Event.');
+    selectedProfile = matches[0]; syncedProfile = ''; profileRevision++;
+    state = loadProfileState(); saveProfile(); renderProfiles();
+    const synced = await syncSheets();
+    if (!synced) throw new Error('Đồng bộ lỗi; không dùng cấu hình cũ để chạy');
+    for (let i = 0; i < COUNT; i++) {
+      if (!validUrl(config[i].url) || (!config[i].comment.trim() && !config[i].tagKude && !config[i].tagDoru)) {
+        throw new Error('Event ' + (i + 1) + ' thiếu link hoặc nội dung CMT; chưa chạy');
+      }
+      selectedEvents[i] = true;
+      const checkbox = $(`feh71-cb-${i}`); if (!checkbox) throw new Error('Thiếu ô chọn Event ' + (i + 1));
+      checkbox.checked = true;
+    }
+    saveEventSelection();
+    const permission = await bridgeRequest({ op: 'permission' });
+    if (!permission?.allowed || !controlJob) { stopBatch(); return; }
+    await controlPublish('running', 'Đã đồng bộ, chọn đủ 5 Event; bắt đầu Like + CMT');
+    startBatch('post');
+    if (!batchTask) throw new Error('Không khởi tạo được hàng chờ Event');
+  }
+
   function log(message) {
     const line = `[${new Date().toLocaleTimeString('vi-VN')}] ${message}`;
-    console.log('[FEH 8.3]', message);
+    console.log('[FEH 8.6]', message);
     const box = $('feh71-log');
     if (box) {
       box.textContent += (box.textContent ? '\n' : '') + line;
@@ -176,6 +259,12 @@
   function setStatus(index, message) {
     if (index < 0 || index >= COUNT) return;
     eventStatus[index] = message;
+    if (controlJob) {
+      controlJob.events ||= [];
+      controlJob.events[index] = { index, state: message === '✓ Hoàn tất' ? 'done' : message.startsWith('Lỗi:') ? 'failed' : 'running', message };
+      saveControlJob();
+      void controlPublish('running', `Event ${index + 1}: ${message}`).catch(error => log('BỘ ĐIỀU PHỐI: ' + error.message));
+    }
     const current = $('feh71-event-status');
     if (current && index === tab) current.textContent = message;
     const button = $(`feh71-tab-${index}`);
@@ -383,8 +472,10 @@
       updateSync();
       for (let i = 0; i < COUNT; i++) setStatus(i, 'Đã đồng bộ');
       log('✓ Đồng bộ thành công cả 5 Event');
+      return true;
     } catch (error) {
       log('✗ Đồng bộ lỗi: ' + error.message);
+      return false;
     } finally {
       syncing = false;
       button.disabled = false;
@@ -483,7 +574,7 @@
 
   async function likePhoto(record) {
     check();
-    // Recheck the page: 8.3 wrote postLiked=true even when it failed.
+    // Recheck the page: 8.6 wrote postLiked=true even when it failed.
     let button = null;
     for (let i = 0; i < 16; i++) {
       check();
@@ -583,7 +674,7 @@
 
   async function addTag(editor, short, name) {
     moveEnd(editor);
-    if (!document.execCommand('insertText', false, ' @' + short)) throw new Error('Không nhập được @' + short);
+    if (!(await insertNative(editor, ' @' + short))) throw new Error('Không nhập được @' + short);
     let option;
     for (let i = 0; i < 30; i++) {
       check(); option = mentionOption(editor, name);
@@ -625,21 +716,50 @@
     throw new Error('Facebook chưa ghi nhận Tag ' + name + '; giữ bản nháp, không gửi');
   }
 
+  function draftNorm(value) { return norm(String(value || '').normalize('NFC').replace(/[\u200B\uFEFF]/g, '')); }
+  function draftValues(editor) {
+    // innerText depends on layout; textContent remains available in a background editor.
+    const paragraphs = [...editor.querySelectorAll('p')];
+    return [editor.innerText || '', paragraphs.length ? paragraphs.map(n => n.textContent || '').join('\n') : editor.textContent || ''];
+  }
+  function draftMatches(editor, expected, withTags = false) {
+    return draftValues(editor).some(value => {
+      const actual = draftNorm(value);
+      return (withTags ? actual.replace(/@(?=Kude Nohara|Nè Doru)/g, '') : actual) === draftNorm(expected);
+    });
+  }
+  function diagnoseDraft(editor, expected, stage) {
+    log('CHẨN ĐOÁN CMT: ' + JSON.stringify({ stage, expected,
+      actual: draftValues(editor), hidden: document.hidden, focused: document.hasFocus(),
+      activeEditor: document.activeElement === editor, connected: editor.isConnected }));
+  }
+
   function validateDraft(editor, text, kude, doru) {
     if (!editor.isConnected) throw new Error('Ô bình luận đã thay đổi; không gửi');
     if (kude && !mentionEntity(editor, 'Kude Nohara')) throw new Error('Tag Kude Nohara chưa hoàn chỉnh; không gửi');
     if (doru && !mentionEntity(editor, 'Nè Doru')) throw new Error('Tag Nè Doru chưa hoàn chỉnh; không gửi');
     const expected = norm([text, kude ? 'Kude Nohara' : '', doru ? 'Nè Doru' : ''].filter(Boolean).join(' '));
-    if (norm(editor.innerText).replace(/@(?=Kude Nohara|Nè Doru)/g, '') !== expected) {
+    if (!draftMatches(editor, expected, true)) {
+      diagnoseDraft(editor, expected, 'trước khi gửi');
       throw new Error('Nội dung hoặc Tag trong bản nháp không khớp; không gửi');
     }
   }
 
   async function typeAndTag(editor, mainText, tagKude, tagDoru) {
-    if (norm(editor.innerText)) throw new Error('Ô bình luận đang có bản nháp; kiểm tra và xoá bản nháp trước khi chạy lại');
+    if (draftValues(editor).some(value => draftNorm(value))) throw new Error('Ô bình luận đang có bản nháp; kiểm tra và xoá bản nháp trước khi chạy lại');
     moveEnd(editor);
-    if (mainText && !document.execCommand('insertText', false, mainText)) throw new Error('Không nhập được nội dung CMT');
-    await sleep(1000); check();
+    if (mainText && !(await insertNative(editor, mainText))) throw new Error('Không nhập được nội dung CMT');
+    // Wait for Facebook to commit the input; never reinsert blindly or send a different draft.
+    let textReady = false;
+    for (let i = 0; i < 30; i++) {
+      await sleep(300); check();
+      if (!editor.isConnected) throw new Error('Facebook đã thay ô CMT; giữ bản nháp, không gửi');
+      if (draftMatches(editor, mainText)) { textReady = true; break; }
+    }
+    if (!textReady) {
+      diagnoseDraft(editor, mainText, 'sau nhập nội dung');
+      throw new Error('Facebook chưa nhận đủ nội dung CMT; giữ bản nháp, không gửi');
+    }
     if (tagKude) await addTag(editor, 'Kude', 'Kude Nohara');
     if (tagDoru) await addTag(editor, 'Doru', 'Nè Doru');
     validateDraft(editor, mainText, tagKude, tagDoru);
@@ -939,6 +1059,7 @@
     saveTask();
     cancelled = true;
     log('Đã dừng toàn bộ tác vụ.');
+    controlFinish('stopped', 'Đã dừng tác vụ tại profile này');
   }
 
   async function proceedBatchQueue() {
@@ -949,11 +1070,13 @@
       const nextIdx = batchTask.queue[batchTask.step];
       log(`Chuyển sang Event tiếp theo: Event ${nextIdx + 1}`);
       await sleep(1500);
+      if (!batchTask || cancelled) return;
       location.assign(config[nextIdx].url);
     } else {
       log('✓ Hoàn tất tất cả các Event trong hàng chờ!');
       batchTask = null;
       saveBatch();
+      controlFinish('complete', 'Hoàn tất 5/5 Event');
     }
   }
 
@@ -1015,6 +1138,7 @@
       } else {
         setStatus(currentIdx, 'Lỗi: ' + error.message);
         log(`✗ Event ${currentIdx + 1}: ${error.message}`);
+        controlFinish('failed', `Event ${currentIdx + 1}: ${error.message}`);
         if (batchTask) {
           batchTask = null; saveBatch();
           log('Đã dừng hàng chờ vì Event gặp lỗi.');
@@ -1084,7 +1208,7 @@
     div.id = 'feh71';
     div.innerHTML = `
       <div id="feh71-head">
-        <span>Facebook Event Helper v8.3</span>
+        <span>Facebook Event Helper v8.6</span>
         <span id="feh71-toggle">[-]</span>
       </div>
       <div id="feh71-body">
@@ -1150,7 +1274,7 @@
           <div style="flex:1;background:#e8f5e9;padding:9px;border-radius:6px;">Đã Like CMT<br><b id="feh82-likes" style="font-size:18px !important;">0/100</b></div>
         </div>
         <div style="margin-top:4px;color:#65676b;">Lượt Like CMT gần nhất của Event đang mở. Tải thêm đếm số lần bấm; Like chỉ đếm lượt mới đã xác nhận.</div>
-        <div id="feh71-log">Nhật ký hoạt động khởi tạo v8.3...</div>
+        <div id="feh71-log">Nhật ký hoạt động khởi tạo v8.6...</div>
       </div>
     `;
 
@@ -1210,11 +1334,21 @@
     saveProfile();
     renderProfiles();
     renderEvent();
-    log('Giao diện v8.3 đã sẵn sàng. Tab chạy độc lập, không tạm dừng khi chuyển tab.');
+    log('Giao diện v8.6 đã sẵn sàng. Tab chạy độc lập, không tạm dừng khi chuyển tab.');
   }
 
-  setTimeout(() => {
+  setTimeout(async () => {
     createPanel();
+    if (controlJob) {
+      try {
+        const permission = await bridgeRequest({ op: 'permission' });
+        if (!permission?.allowed) { stopBatch(); document.documentElement.setAttribute('data-feh-control-ready', '8.6'); return; }
+      } catch (error) {
+        stopBatch(); log('BỘ ĐIỀU PHỐI: ' + error.message);
+        document.documentElement.setAttribute('data-feh-control-ready', '8.6'); return;
+      }
+    }
+    document.documentElement.setAttribute('data-feh-control-ready', '8.6');
     if (batchTask || task) {
       log('Tiếp tục tiến trình hàng chờ...');
       executeTask();
